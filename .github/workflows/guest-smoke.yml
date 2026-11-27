@@ -121,6 +121,8 @@ jobs:
           echo "--- registered entries ---"
           ls -1 /proc/sys/fs/binfmt_misc/
           cat /proc/sys/fs/binfmt_misc/qandroid-aarch64
+          echo "magic bytes: $(awk '/^magic/{print $2}' /proc/sys/fs/binfmt_misc/qandroid-aarch64)"
+          echo "interpreter: $(awk '/^interpreter/{print $2}' /proc/sys/fs/binfmt_misc/qandroid-aarch64)"
 
       - name: build host helpers
         run: |
