@@ -42,7 +42,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 TOOLS = os.path.join(HERE, "tools")
 SCRIPTS = os.path.join(HERE, "scripts")
 HOME_DIR = os.environ.get("QANDROID_HOME", os.path.expanduser("~/.local/share/qandroid"))
-RSS = "https://sourceforge.net/projects/waydroid/rss?path=/images/system/lineage"
+# one feed for both partitions; the vendor images live under /images/vendor/
+RSS = "https://sourceforge.net/projects/waydroid/rss?path=/images"
 QEMU = os.environ.get("QANDROID_QEMU", "qemu-aarch64-static")
 
 
@@ -198,7 +199,7 @@ def rss_items(limit=40):
 
 
 def cmd_image_list(a):
-    items = [i for i in rss_items(200) if i["path"].endswith(".zip")]
+    items = [i for i in rss_items(400) if i["path"].endswith(".zip") and "/images/system/" in i["path"]]
     if a.abi:
         items = [i for i in items if ("waydroid_%s" % a.abi) in i["path"]]
     if a.variant:
@@ -220,8 +221,27 @@ def cmd_image_list(a):
     return 0
 
 
+def pick_vendor(abi, match_date=None):
+    """Waydroid ships the vendor partition separately; without it SurfaceFlinger
+    and netd cannot link (vendor.waydroid.display, libnetd_updatable)."""
+    items = [i for i in rss_items(400)
+             if "/images/vendor/waydroid_%s/" % abi in i["path"] and i["name"].endswith(".zip")]
+    if not items:
+        return None
+    if match_date:
+        # prefer the build that matches the system image; a vendor partition from
+        # a different build week links against different HAL versions
+        same = [i for i in items if match_date in i["name"]]
+        if same:
+            return same[0]
+    mainline = [i for i in items if "-MAINLINE-" in i["name"]]
+    pool = mainline or items
+    pool.sort(key=lambda i: re.findall(r"(\d{8})", i["name"]) or ["0"], reverse=True)
+    return pool[0]
+
+
 def pick_image(abi, variant):
-    items = [i for i in rss_items(200) if i["path"].endswith(".zip")]
+    items = [i for i in rss_items(400) if i["path"].endswith(".zip") and "/images/system/" in i["path"]]
     cand = [i for i in items if ("waydroid_%s/" % abi) in i["path"]
             and "-%s-" % variant.upper() in i["name"]]
     if not cand:
@@ -303,10 +323,21 @@ def cmd_image_fetch(a):
         info = pick_image(a.abi, a.variant)
         print("selected %s" % info["name"])
     dest = os.path.join(cfg["images"], info["name"])
-    if os.path.exists(dest) and not a.force:
-        print("already present: %s" % dest)
-    else:
-        download(info["url"], dest, expected=info.get("md5"))
+    blobs = [info]
+    if not a.no_vendor:
+        dates = re.findall(r"(\d{8})", info["name"])
+        vendor = pick_vendor(a.abi, dates[0] if dates else None)
+        if vendor:
+            print("vendor image: %s" % vendor["name"])
+            blobs.append(vendor)
+        else:
+            print("warning: no vendor image on the mirror for abi=%s" % a.abi)
+    for blob in blobs:
+        path = os.path.join(cfg["images"], blob["name"])
+        if os.path.exists(path) and not a.force:
+            print("already present: %s" % path)
+        else:
+            download(blob["url"], path, expected=blob.get("md5"))
     if a.no_unpack:
         return 0
     out = os.path.join(cfg["images"], os.path.splitext(info["name"])[0])
@@ -317,6 +348,13 @@ def cmd_image_fetch(a):
         for n in names:
             if n.endswith((".img", ".img.sparse", ".tar", ".tar.gz", ".xz")):
                 z.extract(n, out)
+    # vendor lands in the same image dir so rootfs build finds system.img + vendor.img
+    for blob in blobs[1:]:
+        with zipfile.ZipFile(os.path.join(cfg["images"], blob["name"])) as z:
+            for n in z.namelist():
+                if n.endswith(".img"):
+                    z.extract(n, out)
+                    print("vendor payload: %s" % n)
     for base, _d, files in os.walk(out):
         for f in files:
             print("%-50s %10s" % (os.path.join(base, f), human(os.path.getsize(os.path.join(base, f)))))
@@ -748,6 +786,8 @@ def main(argv):
     pf.add_argument("--url")
     pf.add_argument("--force", action="store_true")
     pf.add_argument("--no-unpack", action="store_true")
+    pf.add_argument("--no-vendor", action="store_true",
+                    help="skip the separate vendor partition image")
 
     pr = sub.add_parser("rootfs")
     pr_sub = pr.add_subparsers(dest="sub", required=True)

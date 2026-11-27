@@ -43,7 +43,11 @@ jobs:
             qemu-user-static binfmt-support e2fsprogs \
             python3 curl unzip build-essential psmisc
           # binderfs: a module on Ubuntu generic kernels
-          sudo modprobe binder_linux || echo "::warning::binder_linux module unavailable"
+          # binderfs is a module on Ubuntu kernels and hosted runners often lack
+          # linux-modules-extra, which is where it lives
+          sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)" || true
+          sudo modprobe binder_linux 2>/dev/null || sudo modprobe binder 2>/dev/null \
+            || echo "::warning::binder module unavailable on this runner - IPC will fail"
           ls /sys/module/binder_linux 2>/dev/null || true
           sudo update-binfmts --enable qemu-aarch64 || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "::warning::binfmt not registered"
