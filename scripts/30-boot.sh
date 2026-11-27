@@ -131,6 +131,10 @@ if [ -e "$ROOTFS/system/bin/linker64" ] && [ ! -e "$ROOTFS/apex/com.android.runt
     echo "         flatten-mount the apexes above, or run with real init." >&2
 fi
 
+echo "binder mounts: $(grep -c binder /proc/mounts 2>/dev/null || echo 0)"
+grep binder /proc/mounts 2>/dev/null | sed 's/^/  /' || true
+ls -l "$ROOTFS/dev/binder" "$ROOTFS/dev/hwbinder" "$ROOTFS/dev/vndbinder" 2>/dev/null | sed 's/^/  /' || true
+
 install -m0755 "$HERE/guest-boot.sh" "$ROOTFS/system/bin/qandroid-boot"
 
 ENVV="ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_STORAGE=/storage \
