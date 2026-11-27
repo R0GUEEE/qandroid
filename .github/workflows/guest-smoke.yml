@@ -101,33 +101,24 @@ jobs:
       - name: install patched qemu as the binfmt interpreter
         if: inputs.qemu == 'source'
         run: |
-          # Ubuntu registers /usr/libexec/qemu-binfmt/aarch64-binfmt-P as the
-          # interpreter, and that is a separate file from
-          # /usr/bin/qemu-aarch64-static - replacing only the latter (as the
-          # first attempt did) leaves binfmt running the distro build.
           target=$(awk '/^interpreter /{print $2}' /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null)
           target=${target:-/usr/libexec/qemu-binfmt/aarch64-binfmt-P}
           echo "binfmt interpreter: $target"
-          sudo rm -f "$target"
-          sudo install -m0755 /opt/qandroid-qemu/qemu-aarch64-static "$target"
-          sudo install -m0755 /opt/qandroid-qemu/qemu-aarch64-static /usr/bin/qemu-aarch64-static
+          # The entry carries the F (fix-binary) flag: the kernel opened this
+          # file at registration time and keeps that inode. `install` would
+          # replace the inode and leave the kernel running the old build, so
+          # copy *in place* instead - cp truncates and rewrites the same file.
+          sudo cp -f /opt/qandroid-qemu/qemu-aarch64-static "$target"
+          sudo chmod 0755 "$target"
+          md5sum "$target" /opt/qandroid-qemu/qemu-aarch64-static
           file "$target"
           "$target" --version | head -1
-          # The entry is registered with the F (fix-binary) flag, which makes the
-          # kernel keep the *old* interpreter open at registration time. Simply
-          # replacing the file changes nothing until the entry is re-created.
-          flags=$(awk '/^flags:/{print $2}' /proc/sys/fs/binfmt_misc/qemu-aarch64 || true)
-          echo "binfmt flags: $flags"
-          # The entry may not be in update-binfmts' database (it is not, on these
-          # runners), so touch the procfs node directly: writing -1 drops the
-          # cached interpreter, writing 1 re-opens it from disk.
-          echo -1 | sudo tee /proc/sys/fs/binfmt_misc/qemu-aarch64 >/dev/null
-          echo 1  | sudo tee /proc/sys/fs/binfmt_misc/qemu-aarch64 >/dev/null
+          echo "patched markers in binary: $(strings "$target" | grep -c QANDROID || true)"
+          # belt and braces: try to re-open the interpreter, but this node is
+          # not always writable (EACCES observed on hosted runners)
+          echo -1 | sudo tee /proc/sys/fs/binfmt_misc/qemu-aarch64 >/dev/null 2>&1 || true
+          echo 1  | sudo tee /proc/sys/fs/binfmt_misc/qemu-aarch64 >/dev/null 2>&1 || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64
-          # prove the interpreter the kernel will use is the patched one
-          "$target" --version | head -1
-          # and that the patches are in it
-          strings "$target" | grep -c "QANDROID" || true
 
       - name: build host helpers
         run: |
