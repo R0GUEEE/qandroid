@@ -52,6 +52,11 @@ jobs:
           sudo update-binfmts --enable qemu-aarch64 || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "::warning::binfmt not registered"
 
+      - name: build host helpers
+        run: |
+          make tools
+          ls -l tools/binder-mk
+
       - name: doctor
         run: ./qandroid doctor || true
 
