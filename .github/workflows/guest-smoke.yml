@@ -69,12 +69,6 @@ jobs:
       - name: build rootfs
         run: ./qandroid rootfs build
 
-      - name: can the host itself talk to binder?
-        run: |
-          ROOTFS="$HOME/.local/share/qandroid/rootfs"
-          ./tools/binder-ver "$ROOTFS/dev/binderfs/binder" || true
-          ./tools/binder-ver "$ROOTFS/dev/binder" || true
-
       - name: boot guest (headless, time-boxed)
         continue-on-error: true   # the experimental part: logs matter, colour does not
         run: |
@@ -84,6 +78,14 @@ jobs:
             sh scripts/30-boot.sh "$HOME/.local/share/qandroid/rootfs" "${{ inputs.boot_mode }}" \
             > /tmp/boot.out 2>&1
           echo "boot exit: $?" | tee -a /tmp/boot.out
+
+      - name: can the host itself talk to binder?
+        if: always()
+        run: |
+          ROOTFS="$HOME/.local/share/qandroid/rootfs"
+          # the nodes only exist once boot has prepared /dev
+          ./tools/binder-ver "$ROOTFS/dev/binderfs/binder" || true
+          ./tools/binder-ver "$ROOTFS/dev/binder" || true
 
       - name: collect logs
         if: always()
