@@ -158,9 +158,9 @@ if [ -n "${QANDROID_QEMU_BIN:-}" ]; then
     chmod 0755 "$ROOTFS/qemu-aarch64-static"
     DIRECT_CMD="${QANDROID_DIRECT_CMD:-/system/bin/servicemanager}"
     echo "direct mode: $DIRECT_CMD under $QANDROID_QEMU_BIN"
-    exec unshare --pid --mount --fork --mount-proc \
-        env -i $ENVV \
-        chroot "$ROOTFS" /qemu-aarch64-static "$DIRECT_CMD"
+    # no PID/mount namespace here: a single process needs neither, and unshare
+    # keeps a grandchild alive that outlives `timeout`, hanging the CI step
+    exec env -i $ENVV chroot "$ROOTFS" /qemu-aarch64-static "$DIRECT_CMD"
 fi
 
 echo "booting $ROOTFS (mode=$MODE)"

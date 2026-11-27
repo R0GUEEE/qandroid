@@ -130,7 +130,7 @@ jobs:
           set +e
           sudo env QANDROID_STRACE="${{ inputs.strace }}" \
             QANDROID_QEMU_BIN="${{ inputs.qemu == 'source' && '/usr/local/bin/qemu-aarch64-static' || '' }}" \
-            timeout --signal=TERM "${{ inputs.boot_timeout_seconds }}" \
+            timeout --signal=TERM --kill-after=15 "${{ inputs.boot_timeout_seconds }}" \
             sh scripts/30-boot.sh "$HOME/.local/share/qandroid/rootfs" "${{ inputs.boot_mode }}" \
             > /tmp/boot.out 2>&1
           echo "boot exit: $?" | tee -a /tmp/boot.out
