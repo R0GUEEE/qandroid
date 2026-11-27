@@ -102,10 +102,15 @@ jobs:
       - name: tar
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          [ -n "$VERSION" ] || VERSION=0.2
+          case "$VERSION" in ""|main|master) VERSION=0.2 ;; esac
+          OUT="$RUNNER_TEMP/qandroid-$VERSION.tar.gz"
+          # never write the archive inside the tree being archived: tar would
+          # see it appear and fail with "file changed as we read it"
           tar --exclude=.git --exclude=__pycache__ \
-              --transform "s,^\.,qandroid-$VERSION," \
-              -czf "qandroid-$VERSION.tar.gz" .
+              --transform "s,^\./,qandroid-$VERSION/," \
+              -czf "$OUT" .
+          cp "$OUT" .
+          tar -tzf "qandroid-$VERSION.tar.gz" | head -12
           sha256sum "qandroid-$VERSION.tar.gz" | tee SHA256SUMS
       - uses: actions/upload-artifact@v4
         with:
