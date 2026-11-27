@@ -122,12 +122,14 @@ evidence):
 * flattened APEX binding works; APEX and `system_ext` libraries resolve once
   `/linkerconfig/ld.config.txt` exists
 
+* binder **IPC works under a patched qemu**: `servicemanager` runs until the
+  time-box kills it (exit 124) instead of aborting on `BINDER_VERSION`. The
+  patch is in `patches/apply.sh`; wiring it into `binfmt_misc` for a full boot is
+  what is left (see `docs/BRINGUP.md`, it cannot be done safely on a hosted
+  CI runner)
+
 Still not verified:
 
-* binder **transactions** — `BINDER_VERSION` returns `ENOTTY` from inside QEMU
-  while the host gets protocol 8 from the same node; `patches/apply.sh` now
-  contains the `do_ioctl` passthrough that fixes it, but it needs a qemu built
-  from source
 * booting to a working zygote, `pm install` of a real APK
 * SurfaceFlinger + the HWC client end to end
 * performance numbers

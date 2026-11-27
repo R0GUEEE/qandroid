@@ -13,6 +13,7 @@ things that were assumptions before it existed.
 | 5 | vendor image + ld.config | `netd` and `audioserver` link and execute; `libnetd_updatable`, `libandroidicu` resolve from APEX |
 | 6 | `binder-mk` built in CI, `_IOWR` fix | binderfs mounts, nodes `238:1-3` created and bind-mounted into `/dev` |
 | 7 | `binder-ver` host probe | host: `binder protocol 8` — guest: `BINDER_VERSION → ENOTTY` |
+| 8 | qemu built from source with the ioctl patch, invoked directly | **`servicemanager` runs 40 s until the time-box kills it (exit 124)** — no `Binder driver could not be opened`, no abort |
 
 ## What that establishes
 
@@ -40,6 +41,48 @@ ioctls it has no translation entry for, and it has none for `BINDER_*`.
 `patches/apply.sh` now adds a two-line guard at the top of `do_ioctl` that hands
 every `'b'`-type ioctl to the host unchanged. Applying it requires a qemu built
 from source (see below); the distro `qemu-user-static` cannot be fixed in place.
+
+## The ioctl patch is confirmed
+
+Run 8 launches a single guest process under a qemu built from source with
+`patches/apply.sh` applied, invoked explicitly rather than through binfmt:
+
+```
+direct mode: /system/bin/servicemanager under /usr/local/bin/qemu-aarch64-static
+boot exit: 124            # timeout killed it after 40 s, it never exited
+```
+
+Compare with every earlier run, where the same binary aborted in under a second
+with `Binder driver '/dev/binder' could not be opened. Terminating: Binder ioctl
+to obtain version failed`. A service manager that sits there serving is what
+"binder works" looks like from the outside.
+
+Why direct invocation: making *binfmt* use the patched binary is what a full
+boot needs (children exec too), but it cannot be done safely on a hosted runner —
+see the next section.
+
+## What each binfmt subtlety cost
+
+Getting a patched qemu into the kernel's path took four attempts, each teaching
+something worth writing down:
+
+1. Installing over `/usr/bin/qemu-aarch64-static` changed nothing: Ubuntu
+   registers **`/usr/libexec/qemu-binfmt/aarch64-binfmt-P`** as the interpreter.
+2. Copying to the right path still changed nothing: the entry has the **F
+   (fix-binary)** flag, so the kernel keeps the inode it opened at registration.
+3. Writing `-1` to the entry to release that cache **removed the entry**, and
+   `update-binfmts` does not manage it (`not in database of installed binary
+   formats`).
+4. Registering a fresh entry caught two more: `printf '%s'` leaves `\x7f` as
+   four characters (entry matches nothing), and `printf` **stops at the first
+   NUL**, which registers a truncated magic that matches *every* ELF — after
+   that, the runner's own `bash` and `node` failed with `Exec format error`
+   twice in a row.
+
+Conclusion: own the entry from the start, write the bytes from a program that
+handles NULs (Python), and register it in a job that does not also install the
+distro `qemu-user-static`. Or run on real hardware, where `install` +
+`update-binfmts` just works.
 
 ## Bugs found and fixed along the way
 
