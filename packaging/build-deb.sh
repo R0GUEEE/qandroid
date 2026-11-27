@@ -90,6 +90,9 @@ if [ "$WITH_BINARIES" = 1 ]; then
         "$CC" -O2 -Wall -Wextra -o "$APPDIR/tools/binder-mk" tools/binder-mk.c
         "$CC" -O2 -Wall -Wextra -o "$APPDIR/tools/binder-ver" tools/binder-ver.c
         chmod 0755 "$APPDIR/tools/binder-mk" "$APPDIR/tools/binder-ver"
+        if command -v strip >/dev/null; then
+            strip -s "$APPDIR/tools/binder-mk" "$APPDIR/tools/binder-ver" || true
+        fi
     else
         echo "warning: no C compiler, shipping without helpers" >&2
     fi
@@ -99,11 +102,30 @@ if [ "$WITH_BINARIES" = 1 ]; then
         "$CC" -O2 -Wall -o "$APPDIR/frontend/hwc_client" frontend/hwc_client.c \
               -Ihwc/include $(pkg-config --cflags --libs sdl2)
         chmod 0755 "$APPDIR/frontend/hwc_client"
+        if command -v strip >/dev/null; then strip -s "$APPDIR/frontend/hwc_client" || true; fi
         HAS_SDL=1
     else
         echo "note: SDL2 headers absent, hwc_client not prebuilt (CLI builds it on use)"
     fi
 fi
+
+# anything carrying a shebang is executable, everything else is not
+python3 - "$APPDIR" <<'PY'
+import os, sys
+root = sys.argv[1]
+for base, _dirs, files in os.walk(root):
+    for f in files:
+        full = os.path.join(base, f)
+        if os.path.islink(full):
+            continue
+        with open(full, "rb") as fh:
+            head = fh.read(4)
+        mode = os.stat(full).st_mode
+        if head[:2] == b"#!":
+            os.chmod(full, mode | 0o111)
+        elif head != b"\x7fELF":
+            os.chmod(full, mode & ~0o111)
+PY
 
 # ---- documentation -------------------------------------------------------
 install -m0644 README.md "$DOCDIR/README.md"
