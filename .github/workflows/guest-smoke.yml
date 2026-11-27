@@ -101,11 +101,19 @@ jobs:
       - name: install patched qemu as the binfmt interpreter
         if: inputs.qemu == 'source'
         run: |
-          # binfmt_misc is registered against /usr/bin/qemu-aarch64-static, so
-          # replacing that path is enough - no re-registration needed
+          # Ubuntu registers /usr/libexec/qemu-binfmt/aarch64-binfmt-P as the
+          # interpreter, and that is a separate file from
+          # /usr/bin/qemu-aarch64-static - replacing only the latter (as the
+          # first attempt did) leaves binfmt running the distro build.
+          target=$(awk '/^interpreter /{print $2}' /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null)
+          target=${target:-/usr/libexec/qemu-binfmt/aarch64-binfmt-P}
+          echo "binfmt interpreter: $target"
+          sudo rm -f "$target"
+          sudo install -m0755 /opt/qandroid-qemu/qemu-aarch64-static "$target"
           sudo install -m0755 /opt/qandroid-qemu/qemu-aarch64-static /usr/bin/qemu-aarch64-static
-          file /usr/bin/qemu-aarch64-static
-          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || true
+          file "$target"
+          "$target" --version | head -1
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64
 
       - name: build host helpers
         run: |
