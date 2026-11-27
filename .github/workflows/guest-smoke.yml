@@ -58,7 +58,7 @@ jobs:
       - name: build host helpers
         run: |
           make tools
-          ls -l tools/binder-mk
+          ls -l tools/binder-mk tools/binder-ver
 
       - name: doctor
         run: ./qandroid doctor || true
@@ -68,6 +68,12 @@ jobs:
 
       - name: build rootfs
         run: ./qandroid rootfs build
+
+      - name: can the host itself talk to binder?
+        run: |
+          ROOTFS="$HOME/.local/share/qandroid/rootfs"
+          ./tools/binder-ver "$ROOTFS/dev/binderfs/binder" || true
+          ./tools/binder-ver "$ROOTFS/dev/binder" || true
 
       - name: boot guest (headless, time-boxed)
         continue-on-error: true   # the experimental part: logs matter, colour does not

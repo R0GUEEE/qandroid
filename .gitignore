@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 tools/binder-mk
+tools/binder-ver
 shim/libabshim.so
 *.o
 frontend/hwc_client

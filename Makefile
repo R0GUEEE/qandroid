@@ -9,9 +9,12 @@ HOSTCC := $(CC)
 
 all: tools client
 
-tools: tools/binder-mk
+tools: tools/binder-mk tools/binder-ver
 
 tools/binder-mk: tools/binder-mk.c
+	$(HOSTCC) $(CFLAGS) -o $@ $<
+
+tools/binder-ver: tools/binder-ver.c
 	$(HOSTCC) $(CFLAGS) -o $@ $<
 
 # The shim is guest-arch code: build it with an aarch64 cross compiler.
@@ -44,7 +47,7 @@ doctor:
 	python3 ./qandroid doctor
 
 clean:
-	rm -f tools/binder-mk shim/libabshim.so shim/*.o frontend/hwc_client \
+	rm -f tools/binder-mk tools/binder-ver shim/libabshim.so shim/*.o frontend/hwc_client \
 	    hwc/hwcomposer.qandroid.so
 
 install: all
