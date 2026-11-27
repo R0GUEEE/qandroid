@@ -20,15 +20,19 @@ TOPDIR=$(dirname "$HERE")
 [ "$(id -u)" -eq 0 ] || { echo "boot needs root (namespaces, mounts)"; exit 1; }
 command -v qemu-aarch64-static >/dev/null || { echo "missing qemu-aarch64-static"; exit 1; }
 
-mkdir -p "$ROOTFS"/{proc,sys,dev,dev/binderfs,dev/socket,dev/__properties__,data,tmp}
+mkdir -p "$ROOTFS"/{proc,sys,dev,data,tmp}
 mountpoint -q "$ROOTFS/proc" || mount -t proc proc "$ROOTFS/proc"
-mountpoint -q "$ROOTFS/sys"  || mount --rbind /sys "$ROOTFS/sys"
-mount --make-rslave "$ROOTFS/sys"
-mountpoint -q "$ROOTFS/dev"  || mount --rbind /dev "$ROOTFS/dev"
+mountpoint -q "$ROOTFS/sys"  || { mount --rbind /sys "$ROOTFS/sys" && mount --make-rslave "$ROOTFS/sys"; }
+mountpoint -q "$ROOTFS/dev"  || { mount --rbind /dev "$ROOTFS/dev" && mount --make-rslave "$ROOTFS/dev"; }
 
-# binderfs: three devices, one per byte-stream domain
+# binderfs mountpoint must be created *after* the /dev rbind: that mount hides
+# whatever was in the image's /dev directory, including the directory itself.
+mkdir -p "$ROOTFS/dev/binderfs" "$ROOTFS/dev/socket" "$ROOTFS/dev/__properties__"
 if ! mountpoint -q "$ROOTFS/dev/binderfs"; then
-    mount -t binder binder "$ROOTFS/dev/binderfs"
+    if ! mount -t binder binder "$ROOTFS/dev/binderfs" 2>/dev/null; then
+        echo "warning: binderfs unavailable (modprobe binder_linux?); the guest will" >&2
+        echo "         start but every binder service will fail to open /dev/binder" >&2
+    fi
 fi
 for n in binder hwbinder vndbinder; do
     "$TOPDIR/tools/binder-mk" "$ROOTFS/dev/binderfs" "$n" >/dev/null 2>&1 || true
