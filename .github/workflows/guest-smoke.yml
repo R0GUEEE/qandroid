@@ -25,6 +25,14 @@ on:
       strace:
         description: "QEMU_STRACE value (empty = off, 1 = all guest syscalls)"
         default: ""
+      qemu:
+        description: "which qemu-aarch64 to run the guest with"
+        type: choice
+        options: [distro, source]
+        default: distro
+      qemu_tag:
+        description: "qemu tag to build when qemu=source"
+        default: v9.2.0
 
 jobs:
   smoke:
@@ -54,6 +62,50 @@ jobs:
           ls /sys/module/binder_linux 2>/dev/null || true
           sudo update-binfmts --enable qemu-aarch64 || true
           cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "::warning::binfmt not registered"
+
+      - name: restore patched qemu
+        id: qcache
+        if: inputs.qemu == 'source'
+        uses: actions/cache@v4
+        with:
+          path: /opt/qandroid-qemu
+          key: qemu-${{ inputs.qemu_tag }}-${{ hashFiles('patches/apply.sh') }}
+
+      - name: build qemu from source with patches applied
+        if: inputs.qemu == 'source' && steps.qcache.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build libglib2.0-dev libpixman-1-dev python3-venv
+          git clone -q --depth 1 -b "${{ inputs.qemu_tag }}" \
+            https://gitlab.com/qemu-project/qemu.git /tmp/qemu
+          ./patches/apply.sh /tmp/qemu
+          cd /tmp/qemu
+          # static first (self-contained interpreter), dynamic as a fallback
+          if ./configure --target-list=aarch64-linux-user --disable-system \
+                 --disable-tools --disable-docs --static > /tmp/configure.log 2>&1 \
+             && make -j"$(nproc)" >> /tmp/build.log 2>&1; then
+            echo "built static"
+          else
+            echo "static build failed, retrying dynamically linked"
+            tail -20 /tmp/configure.log /tmp/build.log || true
+            make distclean || true
+            ./configure --target-list=aarch64-linux-user --disable-system \
+              --disable-tools --disable-docs
+            make -j"$(nproc)"
+          fi
+          sudo mkdir -p /opt/qandroid-qemu
+          sudo install -m0755 build/qemu-aarch64 /opt/qandroid-qemu/qemu-aarch64-static
+          /opt/qandroid-qemu/qemu-aarch64-static --version
+          file /opt/qandroid-qemu/qemu-aarch64-static
+
+      - name: install patched qemu as the binfmt interpreter
+        if: inputs.qemu == 'source'
+        run: |
+          # binfmt_misc is registered against /usr/bin/qemu-aarch64-static, so
+          # replacing that path is enough - no re-registration needed
+          sudo install -m0755 /opt/qandroid-qemu/qemu-aarch64-static /usr/bin/qemu-aarch64-static
+          file /usr/bin/qemu-aarch64-static
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || true
 
       - name: build host helpers
         run: |
@@ -120,7 +172,15 @@ jobs:
             printf "| /apex entries bound | %s |\n" "$(ls -1 "$ROOTFS/apex" 2>/dev/null | wc -l)"
             printf "| /dev/binder present | %s |\n" "$([ -e "$ROOTFS/dev/binder" ] && echo yes || echo no)"
             printf "| boot log lines | %s |\n" "$(wc -l < "$LOG" 2>/dev/null || echo 0)"
-            printf "| service pid files | %s |\n" "$(ls -1 "$ROOTFS"/data/local/tmp/*.pid 2>/dev/null | wc -l)"
+            pids=$(ls -1 "$ROOTFS"/data/local/tmp/*.pid 2>/dev/null | wc -l)
+            alive=0
+            for f in "$ROOTFS"/data/local/tmp/*.pid; do
+              [ -f "$f" ] || continue
+              kill -0 "$(cat "$f")" 2>/dev/null && alive=$((alive + 1))
+            done
+            printf "| service pid files | %s |\n" "$pids"
+            printf "| services still alive | %s |\n" "$alive"
+            printf "| qemu | %s |\n" "${{ inputs.qemu }} ${{ inputs.qemu_tag }}"
             echo
             echo '```'
             tail -40 "$LOG" 2>/dev/null || echo "(no guest log)"
