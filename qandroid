@@ -22,6 +22,7 @@ Subcommands:
   boot              start the guest Android userspace
   logs              tail guest logs
   stop              stop the guest
+  setup             fetch an image and build the rootfs (first run)
   display           HWC2 client: guest SurfaceFlinger → host window (SDL2)
   viewer            screencap-based fallback frontend
 """
@@ -38,9 +39,11 @@ import tarfile
 import zipfile
 import urllib.request
 
-HERE = os.path.dirname(os.path.abspath(__file__))
+# realpath, not abspath: the packaged entry point is a symlink from /usr/bin
+HERE = os.path.dirname(os.path.realpath(__file__))
 TOOLS = os.path.join(HERE, "tools")
 SCRIPTS = os.path.join(HERE, "scripts")
+VERSION = "0.3.0"
 HOME_DIR = os.environ.get("QANDROID_HOME", os.path.expanduser("~/.local/share/qandroid"))
 # one feed for both partitions; the vendor images live under /images/vendor/
 RSS = "https://sourceforge.net/projects/waydroid/rss?path=/images"
@@ -82,6 +85,36 @@ def save_cfg(cfg):
     os.makedirs(HOME_DIR, exist_ok=True)
     with open(os.path.join(HOME_DIR, "config.json"), "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def build_helpers(quiet=False):
+    """Compile the host-side helpers that the guest paths need.
+
+    A .deb built without a compiler on the build host ships sources only, so the
+    binaries are built on first use. Nothing here needs more than cc.
+    """
+    needed = []
+    for name in ("binder-mk", "binder-ver"):
+        if not os.path.exists(os.path.join(TOOLS, name)):
+            needed.append(name)
+    if not needed:
+        return True
+    cc = shutil.which(os.environ.get("CC", "cc"))
+    if not cc:
+        print("qandroid: no C compiler available; install build-essential", file=sys.stderr)
+        return False
+    for name in needed:
+        src = os.path.join(TOOLS, name + ".c")
+        out = os.path.join(TOOLS, name)
+        if not os.path.exists(src):
+            continue
+        r = run([cc, "-O2", "-Wall", "-o", out, src])
+        if r.returncode:
+            print("qandroid: building %s failed: %s" % (name, (r.stderr or "").strip()), file=sys.stderr)
+            return False
+        if not quiet:
+            print("built %s" % out)
+    return True
 
 
 def du(path):
@@ -700,6 +733,8 @@ def cmd_apk_list(a):
 # boot / logs / stop
 # --------------------------------------------------------------------------
 def cmd_boot(a):
+    if not a.dry_run and not build_helpers(quiet=True):
+        raise Fail("host helpers missing and could not be built")
     cfg = load_cfg()
     rootfs = a.root or cfg["rootfs"]
     if not os.path.isdir(rootfs):
@@ -762,13 +797,43 @@ def cmd_display(a):
     rootfs = a.root or cfg["rootfs"]
     client = os.path.join(HERE, "frontend", "hwc_client")
     if not os.path.exists(client):
-        raise Fail("host client not built: run `make client` (needs libsdl2-dev)")
+        src = os.path.join(HERE, "frontend", "hwc_client.c")
+        cc = shutil.which(os.environ.get("CC", "cc"))
+        pkg = shutil.which("pkg-config")
+        if cc and pkg and os.path.exists(src):
+            flags = run([pkg, "--cflags", "--libs", "sdl2"])
+            if flags.returncode == 0:
+                print("building the display client (SDL2 found)")
+                r = run([cc, "-O2", "-Wall", "-o", client, src,
+                         "-I" + os.path.join(HERE, "hwc", "include")] + flags.stdout.split())
+                if r.returncode != 0:
+                    raise Fail("building hwc_client failed: %s" % (r.stderr or "").strip())
+        if not os.path.exists(client):
+            raise Fail("host client not built and SDL2 headers are missing "
+                       "(apt install libsdl2-dev, then run `make client`)")
     sockdir = os.path.join(rootfs, "data", "local", "tmp")
     os.makedirs(sockdir, exist_ok=True)
     sock = os.path.join(sockdir, "qandroid-hwc.sock")
     argv = [client, "--socket", sock] + a.extra
     print("+ %s" % " ".join(argv))
     return subprocess.call(argv)
+
+
+def cmd_setup(a):
+    """One-shot: check the host, fetch an image, build the rootfs."""
+    cfg = load_cfg()
+    print("== host check ==")
+    cmd_doctor(a)
+    print("\n== image ==")
+    fetch_args = argparse.Namespace(abi=a.abi, variant=a.variant, url=None,
+                                    force=False, no_unpack=False, no_vendor=False)
+    cmd_image_fetch(fetch_args)
+    print("\n== rootfs ==")
+    build_args = argparse.Namespace(image_dir=None, out=a.root, dry_run=False)
+    rc = cmd_rootfs_build(build_args)
+    if rc == 0:
+        print("\nnext: sudo qandroid boot   (then: qandroid display)")
+    return rc
 
 
 def cmd_viewer(a):
@@ -781,6 +846,7 @@ def main(argv):
     ap = argparse.ArgumentParser(prog="qandroid", description=__doc__.splitlines()[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
                                  epilog=__doc__)
+    ap.add_argument("--version", action="version", version="qandroid " + VERSION)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("doctor")
@@ -835,6 +901,11 @@ def main(argv):
     lg = sub.add_parser("logs")
     lg.add_argument("--lines", type=int, default=100)
     lg.add_argument("-f", "--follow", action="store_true")
+    psu = sub.add_parser("setup", help="fetch an image and build the rootfs")
+    psu.add_argument("--abi", default="arm64")
+    psu.add_argument("--variant", default="VANILLA")
+    psu.add_argument("--root")
+
     pdl = sub.add_parser("display")
     pdl.add_argument("--root")
     pdl.add_argument("extra", nargs=argparse.REMAINDER)
@@ -864,6 +935,8 @@ def main(argv):
             return cmd_logs(a)
         if a.cmd == "stop":
             return cmd_stop(a)
+        if a.cmd == "setup":
+            return cmd_setup(a)
         if a.cmd == "display":
             return cmd_display(a)
         if a.cmd == "viewer":

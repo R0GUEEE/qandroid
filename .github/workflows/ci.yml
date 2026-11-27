@@ -38,7 +38,7 @@ jobs:
       - name: unit tests
         run: |
           for t in tests/test_tools.py tests/test_cli.py tests/test_hwc_proto.py \
-                   tests/test_rootfs_build.py; do
+                   tests/test_rootfs_build.py tests/test_packaging.py; do
             echo "::group::$t"
             python3 "$t" -v
             echo "::endgroup::"
@@ -95,6 +95,70 @@ jobs:
             shim/libabshim.so
             tools/binder-mk
             frontend/hwc_client
+
+  deb:
+    name: debian package (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libsdl2-dev dpkg-dev lintian
+
+      - name: build the package
+        run: ./packaging/build-deb.sh --out dist
+
+      - name: inspect
+        run: |
+          deb=$(ls dist/*.deb)
+          echo "artifact: $deb"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb" | wc -l
+          for f in usr/bin/qandroid usr/lib/qandroid/qandroid \
+                   usr/lib/qandroid/tools/binder-mk \
+                   usr/lib/qandroid/frontend/hwc_client \
+                   usr/share/man/man1/qandroid.1.gz; do
+            dpkg-deb --contents "$deb" | grep -q "$f" \
+              || { echo "::error::missing $f"; exit 1; }
+          done
+          sha256sum "$deb" | tee SHA256SUMS.deb
+
+      - name: lintian
+        continue-on-error: true
+        run: lintian --no-tag-display-limit --fail-on error dist/*.deb || true
+
+      - name: install it for real
+        run: |
+          sudo apt-get install -y --no-install-recommends ./dist/qandroid_*.deb
+          qandroid --version
+          command -v qandroid
+          ls -l /usr/lib/qandroid | head -5
+          qandroid doctor || true
+
+      - name: run from the installed package
+        run: |
+          # an installed qandroid must find its own tree, its tools and its docs
+          qandroid --help | head -3
+          test -x /usr/lib/qandroid/tools/binder-mk
+          test -f /usr/lib/qandroid/docs/BRINGUP.md
+          man --warnings -l /usr/share/man/man1/qandroid.1.gz > /dev/null
+          echo "man page renders"
+
+      - name: remove it cleanly
+        run: |
+          sudo dpkg -r qandroid
+          test ! -e /usr/lib/qandroid && echo "removed cleanly"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qandroid-deb
+          path: |
+            dist/*.deb
+            SHA256SUMS.deb
+          if-no-files-found: error
 
   package:
     name: source tarball

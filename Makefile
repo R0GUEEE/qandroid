@@ -42,11 +42,16 @@ test check:
 	python3 tests/test_cli.py -v
 	python3 tests/test_hwc_proto.py -v
 	python3 tests/test_rootfs_build.py -v
+	python3 tests/test_packaging.py -v
+
+deb:
+	./packaging/build-deb.sh
 
 doctor:
 	python3 ./qandroid doctor
 
 clean:
+	rm -rf dist
 	rm -f tools/binder-mk tools/binder-ver shim/libabshim.so shim/*.o frontend/hwc_client \
 	    hwc/hwcomposer.qandroid.so
 

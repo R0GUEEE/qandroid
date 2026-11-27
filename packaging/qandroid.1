@@ -1,0 +1,113 @@
+.TH QANDROID 1 "2026-11-27" "qandroid 0.3.0" "User Commands"
+.SH NAME
+qandroid \- run arm64 Android APKs on x86_64 Linux
+.SH SYNOPSIS
+.B qandroid
+\fIcommand\fR [\fIoptions\fR]
+.SH DESCRIPTION
+.B qandroid
+runs arm64 Android applications on an x86_64 Linux host. It combines
+\fBqemu-aarch64-user\fR for instruction translation, the host kernel for the
+architecture-independent half of the Android ABI (\fBbinderfs\fR, \fBmemfd\fR,
+\fBfutex\fR, namespaces), and an unmodified arm64 Android userspace on top.
+.PP
+The guest is a real Android userspace: bionic, ART and SurfaceFlinger are the
+platform's own code. Nothing about Android is reimplemented; only the
+instruction set is translated.
+.SH COMMANDS
+.TP
+.B doctor
+Check host prerequisites: page size, qemu, binfmt registration, kernel binderfs,
+memfd, ext4 tooling and whether a rootfs exists.
+.TP
+.B setup
+Fetch an arm64 system and vendor image, then build a rootfs from them. Equivalent
+to \fBimage fetch\fR followed by \fBrootfs build\fR.
+.TP
+.B image list
+List the newest arm64 images on the Waydroid mirror, with sizes and checksums.
+.TP
+.B image fetch
+Download an image (system zip plus the separate vendor partition) and unpack
+\fIsystem.img\fR and \fIvendor.img\fR beside it.
+.TP
+.B rootfs build
+Probe the image layout (system-as-root or a bare \fI/system\fR partition), extract
+it with \fBdebugfs\fR (no loop devices, no root), and report whether init, the
+dynamic linker and the app_process binary are where the guest will look.
+.TP
+.B rootfs shell
+Enter the guest shell, or run a single command in it.
+.TP
+.B apk info
+Inspect an APK offline: package id, version, SDK levels, permissions, ABIs and
+native libraries.
+.TP
+.B apk install
+Install an APK into a running guest through the platform's own
+\fBpm install\fR.
+.TP
+.B apk start
+Launch an installed package.
+.TP
+.B boot
+Start the guest userspace under QEMU inside its own PID namespace, with binderfs
+devices, flattened APEXes bound into \fI/apex\fR and a generated
+\fI/linkerconfig/ld.config.txt\fR.
+.TP
+.B display
+Open the HWC2 display client: the guest's SurfaceFlinger frames in an SDL2
+window, with a uinput virtual touchscreen for input.
+.TP
+.B logs
+Show the guest boot log (\fI\-f\fR follows it).
+.TP
+.B stop
+Stop a running guest.
+.SH OPTIONS
+.TP
+.B \-\-version
+Print the version and exit.
+.SH FILES
+.TP
+.I ~/.local/share/qandroid/
+Per-user state: \fIimages/\fR, \fIrootfs/\fR, \fIlogs/\fR and \fIconfig.json\fR.
+Set \fBQANDROID_HOME\fR to relocate it.
+.TP
+.I /usr/lib/qandroid/
+Installed payload: the CLI, tools, scripts, qemu patches, HWC module sources and
+the display client.
+.SH ENVIRONMENT
+.TP
+.B QANDROID_HOME
+State directory (default \fI~/.local/share/qandroid\fR).
+.TP
+.B QANDROID_QEMU
+qemu interpreter to use (default \fBqemu-aarch64-static\fR).
+.TP
+.B QANDROID_DISPLAY
+Guest display geometry as \fIWxH@Hz\fR for the composer module.
+.TP
+.B QANDROID_HWC_SOCK
+Composer socket path inside the guest.
+.TP
+.B QANDROID_STRACE
+Set to \fB1\fR to pass \fBQEMU_STRACE\fR through to the guest's syscall log.
+.SH EXAMPLES
+.nf
+qandroid doctor
+qandroid setup
+sudo qandroid boot
+sudo qandroid apk install app.apk
+qandroid display
+.fi
+.SH LIMITATIONS
+32-bit (\fIarmeabi-v7a\fR) APKs are not supported, and the guest has no GPU: the
+composer composites on the CPU. Binder IPC needs a qemu built with the patches in
+\fI/usr/lib/qandroid/patches\fR; the distro build returns \fBENOTTY\fR for binder
+ioctls. See \fI/usr/share/doc/qandroid/docs/BRINGUP.md\fR.
+.SH SEE ALSO
+.BR qemu-aarch64 (1),
+.BR apk (1)
+.PP
+Full documentation: \fI/usr/share/doc/qandroid/\fR.

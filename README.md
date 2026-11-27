@@ -35,6 +35,23 @@ That means the Android side is the *real* Android: real bionic, real ART, real
 binder semantics, real `pm`/`am`. Nothing about Android is being emulated or
 approximated. Only `mov`, `add` and friends are.
 
+## Install from a .deb
+
+```sh
+sudo apt install ./qandroid_0.3.0_amd64.deb     # from the CI artifact or a release
+qandroid doctor                                  # what the host still needs
+qandroid setup                                   # fetch an arm64 image, build a rootfs
+sudo qandroid boot
+./qandroid display                               # HWC2 window (SDL2)
+```
+
+The package installs `/usr/lib/qandroid/` (CLI, tools, scripts, qemu patches,
+HWC sources, man page), symlinks `/usr/bin/qandroid`, and pulls
+`python3`, `qemu-user-static` and `e2fsprogs` as dependencies. It never touches
+the system's binfmt entries: `qandroid doctor` reports what is missing and
+`qandroid setup` does the rest. Build your own with `make deb`
+(`packaging/build-deb.sh --arch all --no-binaries` for a source-only package).
+
 ## Quickstart (Ubuntu 22.04 / 24.04, x86_64)
 
 ```sh
