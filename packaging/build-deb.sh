@@ -200,8 +200,19 @@ case "$1" in
   configure)
     # Deliberately non-intrusive: qandroid never edits the system's binfmt
     # entries on its own, it only reports what is missing.
-    echo "qandroid: 'qandroid doctor' checks prerequisites, 'qandroid setup'"
-    echo "          fetches an arm64 image and builds a rootfs (needs ~2 GiB)."
+    if ! command -v qemu-aarch64-static >/dev/null 2>&1 &&
+       [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+      echo "qandroid: no arm64 emulator found; install qemu-user-static" >&2
+    fi
+    for f in qandroid tools/apk.py scripts/30-boot.sh scripts/guest-boot.sh \
+             patches/apply.sh; do
+      if [ ! -e "/usr/lib/qandroid/$f" ]; then
+        echo "qandroid: payload incomplete, /usr/lib/qandroid/$f missing" >&2
+        exit 1
+      fi
+    done
+    echo "qandroid: 'qandroid doctor' checks the host, 'qandroid setup' fetches"
+    echo "          an arm64 image and builds a rootfs (needs about 2 GiB)."
     ;;
 esac
 exit 0
