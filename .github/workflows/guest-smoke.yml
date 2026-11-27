@@ -22,6 +22,9 @@ on:
       boot_timeout_seconds:
         description: "how long to let the guest run before dumping logs"
         default: "180"
+      strace:
+        description: "QEMU_STRACE value (empty = off, 1 = all guest syscalls)"
+        default: ""
 
 jobs:
   smoke:
@@ -70,7 +73,8 @@ jobs:
         continue-on-error: true   # the experimental part: logs matter, colour does not
         run: |
           set +e
-          sudo timeout --signal=TERM "${{ inputs.boot_timeout_seconds }}" \
+          sudo env QANDROID_STRACE="${{ inputs.strace }}" \
+            timeout --signal=TERM "${{ inputs.boot_timeout_seconds }}" \
             sh scripts/30-boot.sh "$HOME/.local/share/qandroid/rootfs" "${{ inputs.boot_mode }}" \
             > /tmp/boot.out 2>&1
           echo "boot exit: $?" | tee -a /tmp/boot.out

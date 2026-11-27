@@ -143,6 +143,12 @@ ANDROID_TZDATA_ROOT=/apex/com.android.tzdata \
 PATH=/system/bin:/system/xbin:/vendor/bin:/sbin:/usr/bin:/bin \
 HOME=/data LOGNAME=root USER=root TERM=${TERM:-xterm}"
 
+# QANDROID_STRACE=1 -> every guest syscall qemu cannot or should not pass through
+# verbatim lands in the log; essential when a guest ioctl fails with ENOTTY.
+if [ -n "${QANDROID_STRACE:-}" ]; then
+    ENVV="$ENVV QEMU_STRACE=$QANDROID_STRACE"
+fi
+
 echo "booting $ROOTFS (mode=$MODE)"
 # --mount keeps init's mount acrobatics inside our namespace; --mount-proc gives
 # the guest an arch-correct /proc even though QEMU emulates the syscalls.
