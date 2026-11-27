@@ -208,7 +208,11 @@ jobs:
             qandroid doctor || true
             test -x /usr/lib/qandroid/tools/binder-mk
             sh /src/install.sh --uninstall
-            command -v qandroid && exit 1 || echo "uninstalled, CLI gone"
+            # bash caches command paths: without dropping the cache, `command -v`
+            # keeps reporting the deleted /usr/bin/qandroid
+            hash -r
+            test ! -e /usr/bin/qandroid || { echo "left behind: /usr/bin/qandroid"; exit 1; }
+            command -v qandroid && { echo "still on PATH"; exit 1; } || echo "uninstalled, CLI gone"
           '
 
       - name: source install inside a clean alpine container
