@@ -149,6 +149,20 @@ if [ -n "${QANDROID_STRACE:-}" ]; then
     ENVV="$ENVV QEMU_STRACE=$QANDROID_STRACE"
 fi
 
+# Direct mode: run a single guest process under an explicitly chosen qemu.
+# binfmt is left alone - this is how the patched qemu gets exercised without
+# touching the host's binary formats. Guest paths stay correct because we are
+# inside the chroot; qemu is copied in so it is reachable there.
+if [ -n "${QANDROID_QEMU_BIN:-}" ]; then
+    cp -f "$QANDROID_QEMU_BIN" "$ROOTFS/qemu-aarch64-static"
+    chmod 0755 "$ROOTFS/qemu-aarch64-static"
+    DIRECT_CMD="${QANDROID_DIRECT_CMD:-/system/bin/servicemanager}"
+    echo "direct mode: $DIRECT_CMD under $QANDROID_QEMU_BIN"
+    exec unshare --pid --mount --fork --mount-proc \
+        env -i $ENVV \
+        chroot "$ROOTFS" /qemu-aarch64-static "$DIRECT_CMD"
+fi
+
 echo "booting $ROOTFS (mode=$MODE)"
 # --mount keeps init's mount acrobatics inside our namespace; --mount-proc gives
 # the guest an arch-correct /proc even though QEMU emulates the syscalls.

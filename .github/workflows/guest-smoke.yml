@@ -15,9 +15,9 @@ on:
         options: [VANILLA, GAPPS]
         default: VANILLA
       boot_mode:
-        description: "guest boot mode"
+        description: "guest boot mode (manual/init), or direct-single-process"
         type: choice
-        options: [manual, init]
+        options: [manual, init, direct]
         default: manual
       boot_timeout_seconds:
         description: "how long to let the guest run before dumping logs"
@@ -98,52 +98,17 @@ jobs:
           /opt/qandroid-qemu/qemu-aarch64-static --version
           file /opt/qandroid-qemu/qemu-aarch64-static
 
-      - name: install patched qemu and register it for arm64 ELFs
+      - name: install patched qemu
         if: inputs.qemu == 'source'
         run: |
           sudo install -m0755 /opt/qandroid-qemu/qemu-aarch64-static \
             /usr/local/bin/qemu-aarch64-static
           /usr/local/bin/qemu-aarch64-static --version | head -1
-
-          # Drop whatever entry the distro package registered: with the F
-          # (fix-binary) flag the kernel pins the interpreter it opened at
-          # registration time, so swapping the file underneath changes nothing.
-          for n in qemu-aarch64 qandroid-aarch64; do
-            if [ -e "/proc/sys/fs/binfmt_misc/$n" ]; then
-              echo -1 | sudo tee "/proc/sys/fs/binfmt_misc/$n" >/dev/null 2>&1 || true
-            fi
-          done
-
-          # Our own entry, no F flag: the interpreter is opened per exec, so the
-          # patched binary is always the one that runs.
-          #
-          # The magic contains NUL bytes, and bash's printf stops at the first
-          # one - which registers a truncated entry that matches every ELF and
-          # breaks exec for the whole runner (observed: every later step died
-          # with 'Exec format error'). Write the bytes from Python instead.
-          python3 - <<'EOF' > /tmp/binfmt-line
-          import sys
-          sys.stdout.buffer.write(
-              b':qandroid-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-              b'\x02\x00\xb7\x00:'
-              b'\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:'
-              b'/usr/local/bin/qemu-aarch64-static:POC')
-          EOF
-          test "$(wc -c < /tmp/binfmt-line)" -gt 100 || { echo "::error::bad binfmt line"; exit 1; }
-          sudo tee /proc/sys/fs/binfmt_misc/register < /tmp/binfmt-line >/dev/null
-
-          echo "--- registered entries ---"
-          ls -1 /proc/sys/fs/binfmt_misc/
-          cat /proc/sys/fs/binfmt_misc/qandroid-aarch64
-
-          # a broken entry breaks exec for the runner itself, so prove that a
-          # native binary still runs before doing anything else
-          if ! /bin/true; then
-            echo "::error::registering the arm64 entry broke native exec"
-            echo -1 | sudo tee /proc/sys/fs/binfmt_misc/qandroid-aarch64 >/dev/null 2>&1 || true
-            exit 1
-          fi
-          echo "native exec still fine"
+          # Deliberately no binfmt manipulation here. Swapping the registered
+          # interpreter on a hosted runner broke exec for the whole job twice
+          # (the F-flag cached inode, then a truncated entry), and losing the
+          # runner costs more than it buys. Instead the patched qemu is invoked
+          # explicitly for the process under test - see scripts/30-boot.sh.
 
       - name: build host helpers
         run: |
@@ -164,6 +129,7 @@ jobs:
         run: |
           set +e
           sudo env QANDROID_STRACE="${{ inputs.strace }}" \
+            QANDROID_QEMU_BIN="${{ inputs.qemu == 'source' && '/usr/local/bin/qemu-aarch64-static' || '' }}" \
             timeout --signal=TERM "${{ inputs.boot_timeout_seconds }}" \
             sh scripts/30-boot.sh "$HOME/.local/share/qandroid/rootfs" "${{ inputs.boot_mode }}" \
             > /tmp/boot.out 2>&1
