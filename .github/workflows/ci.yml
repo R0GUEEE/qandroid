@@ -1,0 +1,115 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  unit:
+    name: unit tests + syntax
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: host toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+
+      - name: composer module syntax check (vendored shim headers)
+        run: make hwc-check
+
+      - name: unit tests
+        run: |
+          for t in tests/test_tools.py tests/test_cli.py tests/test_hwc_proto.py; do
+            echo "::group::$t"
+            python3 "$t" -v
+            echo "::endgroup::"
+          done
+
+      - name: static checks
+        run: sh scripts/lint.sh
+
+  build:
+    name: cross-build (arm64 guest + host client)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            libsdl2-dev pkg-config file e2fsprogs
+
+      - name: host helper (binderfs node creator)
+        run: make tools && file tools/binder-mk
+
+      - name: guest composer module (aarch64)
+        run: |
+          make -C hwc AARCH64_CC=aarch64-linux-gnu-gcc
+          file hwc/hwcomposer.qandroid.so
+          file hwc/hwcomposer.qandroid.so | grep -q 'ARM aarch64' \
+            || { echo "::error::composer module is not aarch64"; exit 1; }
+
+      - name: guest bionic shim (aarch64)
+        run: make shim AARCH64_CC=aarch64-linux-gnu-gcc && file shim/libabshim.so
+
+      - name: host display client (x86_64, SDL2)
+        run: |
+          make client
+          file frontend/hwc_client
+          ./frontend/hwc_client --help 2>&1 | head -2 || true
+
+      - name: CLI smoke
+        run: |
+          ./qandroid --help >/dev/null
+          ./qandroid doctor || true
+          ./qandroid image list --abi arm64 --limit 2 || true
+
+      - name: artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qandroid-build-${{ github.sha }}
+          if-no-files-found: error
+          path: |
+            hwc/hwcomposer.qandroid.so
+            shim/libabshim.so
+            tools/binder-mk
+            frontend/hwc_client
+
+  package:
+    name: source tarball
+    needs: [unit, build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: tar
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ -n "$VERSION" ] || VERSION=0.2
+          tar --exclude=.git --exclude=__pycache__ \
+              --transform "s,^\.,qandroid-$VERSION," \
+              -czf "qandroid-$VERSION.tar.gz" .
+          sha256sum "qandroid-$VERSION.tar.gz" | tee SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qandroid-source
+          path: |
+            qandroid-*.tar.gz
+            SHA256SUMS

@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+tools/binder-mk
+shim/libabshim.so
+*.o
+frontend/hwc_client
+hwc/hwcomposer.qandroid.so

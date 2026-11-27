@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""qandroid - run arm64 Android APKs on x86_64 Linux.
+
+Architecture: the host kernel provides the boring, arch-independent half of the
+Android ABI (binderfs, memfd, ashmem-compatible shared memory, futexes, namespaces)
+and qemu-aarch64-user provides instruction translation.  On top of that sits an
+unmodified arm64 Android userspace (LineageOS/Waydroid 20 arm64 image), so
+bionic, libhwbinder, ART and SurfaceFlinger are the real Apple-of-Android code -
+no reimplementation of the Android runtime, no proprietary translator.
+
+Native arm64 code in the APK therefore executes natively in the guest's own ABI;
+only the instruction set is translated.  That is the whole compatibility layer.
+
+Subcommands:
+  doctor            check host prerequisites
+  image list        newest arm64 images from the Waydroid mirror
+  image fetch       download + unpack an arm64 system image
+  rootfs build      turn system.img/vendor.img into a chroot rootfs
+  rootfs shell      enter the guest shell (QEMU + binfmt)
+  apk info|libs     inspect an APK offline
+  apk install       install an APK into the guest
+  boot              start the guest Android userspace
+  logs              tail guest logs
+  stop              stop the guest
+  display           HWC2 client: guest SurfaceFlinger → host window (SDL2)
+  viewer            screencap-based fallback frontend
+"""
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import hashlib
+import tarfile
+import zipfile
+import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TOOLS = os.path.join(HERE, "tools")
+SCRIPTS = os.path.join(HERE, "scripts")
+HOME_DIR = os.environ.get("QANDROID_HOME", os.path.expanduser("~/.local/share/qandroid"))
+RSS = "https://sourceforge.net/projects/waydroid/rss?path=/images/system/lineage"
+QEMU = os.environ.get("QANDROID_QEMU", "qemu-aarch64-static")
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+class Fail(Exception):
+    pass
+
+
+def run(cmd, **kw):
+    return subprocess.run(cmd, capture_output=True, text=True, **kw)
+
+
+def need_root(what):
+    if os.geteuid() != 0 and not os.environ.get("QANDROID_FAKE_ROOT"):
+        raise Fail("%s needs root (uid 0); re-run with sudo, or use --dry-run to print the plan" % what)
+
+
+def human(n):
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if n < 1024 or unit == "TiB":
+            return "%.1f %s" % (n, unit)
+        n /= 1024.0
+
+
+def load_cfg():
+    p = os.path.join(HOME_DIR, "config.json")
+    if os.path.exists(p):
+        with open(p) as f:
+            return json.load(f)
+    return {"rootfs": os.path.join(HOME_DIR, "rootfs"), "images": os.path.join(HOME_DIR, "images")}
+
+
+def save_cfg(cfg):
+    os.makedirs(HOME_DIR, exist_ok=True)
+    with open(os.path.join(HOME_DIR, "config.json"), "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def du(path):
+    total = 0
+    for base, _dirs, files in os.walk(path):
+        for f in files:
+            fp = os.path.join(base, f)
+            if not os.path.islink(fp):
+                total += os.path.getsize(fp)
+    return total
+
+
+# --------------------------------------------------------------------------
+# doctor
+# --------------------------------------------------------------------------
+def probe_binfmt():
+    p = "/proc/sys/fs/binfmt_misc/qemu-aarch64"
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p) as f:
+            txt = f.read()
+    except OSError as e:
+        return "unreadable: %s" % e
+    if "enabled" not in txt:
+        return "registered but disabled"
+    return "registered"
+
+
+def kernel_version():
+    v = os.uname().release
+    m = re.match(r"(\d+)\.(\d+)", v)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def probe_kernel(feature):
+    """Ask the running kernel what it supports. Reads files directly: no grep,
+    no shell, nothing that can block on a procfs oddity."""
+    if feature == "binderfs":
+        try:
+            with open("/proc/filesystems") as f:
+                fs = f.read()
+        except OSError:
+            fs = ""
+        if "binderfs" in fs:
+            return "yes"
+        return "yes (already mounted)" if os.path.isdir("/dev/binderfs") else "no"
+    if feature == "ashmem":
+        return "yes" if os.path.exists("/dev/ashmem") else "no (Android 12+ images do not need it)"
+    if feature == "memfd":
+        return "yes (kernel >= 3.17)" if kernel_version() >= (3, 17) else "no (kernel too old)"
+    if feature == "kvm":
+        return "yes" if os.path.exists("/dev/kvm") else "no"
+    return "unknown"
+
+
+def cmd_doctor(a):
+    cfg = load_cfg()
+    arch = os.uname().machine
+    rows = [
+        ("host arch", arch, arch in ("x86_64", "amd64")),
+        ("page size", str(os.sysconf("SC_PAGE_SIZE")), True),
+        ("python", sys.version.split()[0], sys.version_info >= (3, 8)),
+        ("qemu aarch64 user", shutil.which(QEMU) or "MISSING", bool(shutil.which(QEMU))),
+        ("kernel version", ".".join(map(str, kernel_version()[:2])), kernel_version() >= (4, 11)),
+        ("binfmt_misc aarch64", probe_binfmt() or "not registered", bool(probe_binfmt())),
+        ("kernel: binderfs", probe_kernel("binderfs"), "yes" in probe_kernel("binderfs")),
+        ("kernel: memfd_create", probe_kernel("memfd"), "yes" in probe_kernel("memfd")),
+        ("kernel: /dev/ashmem", probe_kernel("ashmem"), None),
+        ("kernel: kvm (irrelevant here)", probe_kernel("kvm"), None),
+        ("debugfs (ext4 extract)", shutil.which("debugfs") or "MISSING", bool(shutil.which("debugfs"))),
+        ("sudo/root", "yes" if os.geteuid() == 0 else "no", os.geteuid() == 0),
+        ("rootfs", cfg["rootfs"] if os.path.exists(cfg["rootfs"]) else "not built", None),
+    ]
+    width = max(len(r[0]) for r in rows)
+    hard_ok = True
+    for name, val, ok in rows:
+        mark = "ok  " if ok else ("WARN" if ok is None else "FAIL")
+        if ok is False:
+            hard_ok = False
+        print("%s %-*s  %s" % (mark, width, name, val))
+    if not hard_ok:
+        print("\nfailures above block the guest from starting; see docs/LIMITS.md")
+        return 1
+    return 0
+
+
+# --------------------------------------------------------------------------
+# image handling
+# --------------------------------------------------------------------------
+def parse_rss(xml):
+    out = []
+    for body in re.findall(r"<item>(.*?)</item>", xml, re.S):
+        title = re.search(r"<title>(.*?)</title>", body, re.S)
+        link = re.search(r"<link>(.*?)</link>", body, re.S)
+        size = re.search(r'filesize="(\d+)"', body)
+        md5 = re.search(r'<media:hash algo="md5">([0-9a-f]{32})', body)
+        if not (title and link):
+            continue
+        path = title.group(1).strip("<![CDATA[").strip("]]>").strip()
+        out.append({
+            "path": path,
+            "name": os.path.basename(path),
+            "url": link.group(1).strip(),
+            "size": int(size.group(1)) if size else None,
+            "md5": md5.group(1) if md5 else None,
+        })
+    return out
+
+
+def rss_items(limit=40):
+    with urllib.request.urlopen(RSS, timeout=30) as r:
+        xml = r.read().decode("utf-8", "replace")
+    return parse_rss(xml)[:limit]
+
+
+def cmd_image_list(a):
+    items = [i for i in rss_items(200) if i["path"].endswith(".zip")]
+    if a.abi:
+        items = [i for i in items if ("waydroid_%s" % a.abi) in i["path"]]
+    if a.variant:
+        items = [i for i in items if ("-%s-" % a.variant.upper()) in i["name"]]
+    seen, rows = set(), []
+    for i in items:
+        key = i["path"].rsplit("/", 1)[0]
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(i)
+    rows = rows[: a.limit]
+    if a.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for i in rows:
+        print("%-72s %10s" % (i["name"], human(i["size"]) if i["size"] else "?"))
+        print("   %s" % i["url"])
+    return 0
+
+
+def pick_image(abi, variant):
+    items = [i for i in rss_items(200) if i["path"].endswith(".zip")]
+    cand = [i for i in items if ("waydroid_%s/" % abi) in i["path"]
+            and "-%s-" % variant.upper() in i["name"]]
+    if not cand:
+        raise Fail("no %s/%s image found on the mirror" % (abi, variant))
+    # newest by date embedded in filename
+    cand.sort(key=lambda i: re.findall(r"(\d{8})", i["name"]) or ["0"], reverse=True)
+    return cand[0]
+
+
+def md5_of(path):
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def download(url, dest, expected=None):
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    tmp = dest + ".part"
+    print("fetching %s" % url)
+    with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
+        total = int(r.headers.get("Content-Length") or 0)
+        done = 0
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                break
+            f.write(chunk)
+            done += len(chunk)
+            if total:
+                sys.stderr.write("\r  %5.1f%%  %s / %s" % (100.0 * done / total, human(done), human(total)))
+            else:
+                sys.stderr.write("\r  %s" % human(done))
+    sys.stderr.write("\n")
+    os.replace(tmp, dest)
+    h = hashlib.sha256()
+    with open(dest, "rb") as f:
+        for b in iter(lambda: f.read(1 << 20), b""):
+            h.update(b)
+    digest = h.hexdigest()
+    print("sha256 %s" % digest)
+    if expected:
+        got = md5_of(dest)
+        print("md5    %s %s" % (got, "ok" if got == expected else "MISMATCH (mirror said %s)" % expected))
+    return dest
+
+
+def cmd_image_fetch(a):
+    cfg = load_cfg()
+    if a.url:
+        info = {"url": a.url, "name": os.path.basename(a.url.split("?")[0])}
+    else:
+        info = pick_image(a.abi, a.variant)
+        print("selected %s" % info["name"])
+    dest = os.path.join(cfg["images"], info["name"])
+    if os.path.exists(dest) and not a.force:
+        print("already present: %s" % dest)
+    else:
+        download(info["url"], dest, expected=info.get("md5"))
+    if a.no_unpack:
+        return 0
+    out = os.path.join(cfg["images"], os.path.splitext(info["name"])[0])
+    os.makedirs(out, exist_ok=True)
+    with zipfile.ZipFile(dest) as z:
+        names = z.namelist()
+        print("archive contains: %s" % ", ".join(names))
+        for n in names:
+            if n.endswith((".img", ".img.sparse", ".tar", ".tar.gz", ".xz")):
+                z.extract(n, out)
+    for base, _d, files in os.walk(out):
+        for f in files:
+            print("%-50s %10s" % (os.path.join(base, f), human(os.path.getsize(os.path.join(base, f)))))
+    cfg["last_image"] = out
+    save_cfg(cfg)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# rootfs
+# --------------------------------------------------------------------------
+def ext4_extract(img, dest, dry=False):
+    """Unprivileged ext4 extraction via debugfs rdump (no loop mount, no root)."""
+    cmd = ["debugfs", "-R", "rdump / %s" % dest, img]
+    print("+ %s" % " ".join(cmd))
+    if dry:
+        return
+    if not shutil.which("debugfs"):
+        raise Fail("debugfs is required (apt install e2fsprogs)")
+    os.makedirs(dest, exist_ok=True)
+    r = run(cmd)
+    if r.returncode not in (0, 1) and "not a directory" not in (r.stderr or ""):
+        raise Fail("debugfs failed: %s" % (r.stderr or r.stdout))
+    # debugfs refuses to overwrite existing files; that is fine for a fresh dir
+
+
+def cmd_rootfs_build(a):
+    cfg = load_cfg()
+    src = a.image_dir or cfg.get("last_image")
+    if not src or not os.path.isdir(src):
+        raise Fail("give --image-dir (a directory holding system.img / vendor.img / super.img)")
+    rootfs = a.out or cfg["rootfs"]
+    os.makedirs(rootfs, exist_ok=True)
+
+    system = os.path.join(src, "system.img")
+    vendor = os.path.join(src, "vendor.img")
+    superimg = os.path.join(src, "super.img")
+
+    if os.path.exists(superimg) and not (os.path.exists(system) and os.path.exists(vendor)):
+        lp = os.path.join(TOOLS, "lpunpack.py")
+        raw = os.path.join(src, "unpacked")
+        print("unpacking logical partitions from super.img")
+        subprocess.run([sys.executable, lp, "extract", superimg, raw, "--quiet"], check=True)
+        for name in ("system", "vendor", "product"):
+            cand = os.path.join(raw, name)
+            for variant in (cand + ".img", cand + "_a.img"):
+                if os.path.exists(variant):
+                    dest = os.path.join(src, name + ".img")
+                    if not os.path.exists(dest):
+                        os.link(variant, dest)
+                    break
+        system, vendor = os.path.join(src, "system.img"), os.path.join(src, "vendor.img")
+
+    if not os.path.exists(system):
+        raise Fail("no system.img in %s" % src)
+
+    print("extracting system.img -> %s/system" % rootfs)
+    ext4_extract(system, os.path.join(rootfs, "system"), dry=a.dry_run)
+    if os.path.exists(vendor):
+        print("extracting vendor.img -> %s/vendor" % rootfs)
+        ext4_extract(vendor, os.path.join(rootfs, "vendor"), dry=a.dry_run)
+
+    # AOSP-style top level symlinks: /system/bin, /vendor/bin, /product, /odm
+    links = [("bin", "system/bin"), ("lib64", "system/lib64"), ("lib", "system/lib"),
+             ("etc", "system/etc"), ("apex", "system/apex")]
+    if os.path.isdir(os.path.join(rootfs, "system", "vendor")):
+        links.append(("vendor", "system/vendor"))
+    for link, target in links:
+        if a.dry_run:
+            continue
+        p = os.path.join(rootfs, link)
+        if os.path.lexists(p) or not os.path.isdir(os.path.join(rootfs, target)):
+            continue
+        os.symlink(target, p)
+
+    for d in ("data", "data/local/tmp", "data/app", "dev", "proc", "sys", "tmp",
+              "mnt", "sdcard", "system_dlkm", "metadata"):
+        if not a.dry_run:
+            os.makedirs(os.path.join(rootfs, d), exist_ok=True)
+    if os.path.isdir(os.path.join(rootfs, "system")) and not a.dry_run:
+        os.chmod(os.path.join(rootfs, "tmp"), 0o1777)
+
+    print("rootfs %s: %s, %d top-level entries" % (rootfs, human(du(rootfs)), len(os.listdir(rootfs))))
+    if not a.dry_run:
+        with open(os.path.join(rootfs, "etc", "qandroid-rootfs"), "w") as f:
+            f.write("built from %s\n" % os.path.abspath(src))
+    return 0
+
+
+GUEST_ENV = {
+    "ANDROID_ROOT": "/system",
+    "ANDROID_DATA": "/data",
+    "ANDROID_ART_ROOT": "/apex/com.android.art",
+    "ANDROID_I18N_ROOT": "/apex/com.android.i18n",
+    "ANDROID_TZDATA_ROOT": "/apex/com.android.tzdata",
+    "ANDROID_STORAGE": "/storage",
+    "EXTERNAL_STORAGE": "/sdcard",
+    "PATH": "/system/bin:/system/xbin:/vendor/bin:/sbin:/usr/bin:/bin",
+    "HOME": "/data",
+    "USER": "root",
+    "LOGNAME": "root",
+}
+
+
+def guest_env():
+    env = {"TERM": os.environ.get("TERM", "xterm")}
+    env.update(GUEST_ENV)
+    return env
+
+
+def bind_mounts(rootfs, dry=False):
+    """Mounts the guest expects. Host kernel does these; the guest just uses them."""
+    plan = [
+        (["mount", "-t", "proc", "proc", os.path.join(rootfs, "proc")], "proc"),
+        (["mount", "--rbind", "/sys", os.path.join(rootfs, "sys")], "sys"),
+        (["mount", "--rbind", "/dev", os.path.join(rootfs, "dev")], "dev"),
+        (["mount", "-t", "tmpfs", "tmp", os.path.join(rootfs, "dev/shm")], "dev/shm"),
+    ]
+    binderfs = os.path.join(rootfs, "dev/binderfs")
+    os.makedirs(binderfs, exist_ok=True)
+    plan.append((["mount", "-t", "binder", "binder", binderfs], "binderfs"))
+    mk = os.path.join(TOOLS, "binder-mk")
+    for name in ("binder", "hwbinder", "vndbinder"):
+        node = os.path.join(binderfs, name)
+        plan.append(([mk, binderfs, name], "node " + name))
+        tgt = os.path.join(rootfs, "dev", name)
+        plan.append((["mount", "--bind", node, tgt], "bind " + name))
+    for cmd, label in plan:
+        print("  + %s" % " ".join(cmd))
+        if not dry:
+            r = run(cmd)
+            if r.returncode:
+                print("    ! %s: %s" % (label, (r.stderr or "").strip()))
+
+
+def enter_guest(rootfs, argv, dry=False):
+    """Exec an arm64 guest binary.
+
+    With binfmt_misc registered the kernel picks qemu-aarch64-static up
+    transparently, so a plain chroot is enough.  Without it we call qemu by hand,
+    which also works but does not compose with setuid/namespace tricks.
+    """
+    qemu = shutil.which(QEMU)
+    if dry:
+        print("+ chroot %s %s   (dry run)" % (rootfs, " ".join(argv)))
+        return 0
+    if probe_binfmt():
+        cmd = ["chroot", rootfs] + argv
+    elif qemu:
+        cmd = [qemu, "-L", rootfs, "-cpu", "max", "--"] + argv
+    else:
+        raise Fail("neither binfmt_misc aarch64 nor qemu-aarch64-static available "
+                   "(run scripts/00-deps.sh)")
+    print("+ %s" % " ".join(cmd))
+    return subprocess.call(cmd, env=guest_env())
+
+
+def cmd_rootfs_shell(a):
+    cfg = load_cfg()
+    rootfs = a.root or cfg["rootfs"]
+    if not os.path.isdir(rootfs):
+        raise Fail("rootfs not built: %s" % rootfs)
+    argv = [c for c in (getattr(a, "args", []) or []) if c != "--"]
+    if not a.dry_run:
+        need_root("chroot")
+        bind_mounts(rootfs)
+    return enter_guest(rootfs, argv or ["/system/bin/sh"], dry=a.dry_run)
+
+
+# --------------------------------------------------------------------------
+# apk
+# --------------------------------------------------------------------------
+def cmd_apk_info(a):
+    r = subprocess.run([sys.executable, os.path.join(TOOLS, "apk.py"), "info", a.apk] +
+                       (["--json"] if a.json else []))
+    return r.returncode
+
+
+def cmd_apk_install(a):
+    cfg = load_cfg()
+    rootfs = a.root or cfg["rootfs"]
+    if not os.path.isdir(rootfs):
+        raise Fail("rootfs not built")
+    with zipfile.ZipFile(a.apk) as z:
+        has_arm64 = any(n.startswith("lib/arm64-v8a/") for n in z.namelist())
+    if not has_arm64:
+        print("note: APK has no arm64-v8a native code; it runs entirely on ART (still fine)")
+    need_root("installing into the guest")
+    tmpdir = os.path.join(rootfs, "data/local/tmp")
+    os.makedirs(tmpdir, exist_ok=True)
+    dest = os.path.join(tmpdir, os.path.basename(a.apk))
+    shutil.copy2(a.apk, dest)
+    guest_path = "/data/local/tmp/" + os.path.basename(a.apk)
+    return enter_guest(rootfs, ["/system/bin/pm", "install", "-r", "-g", guest_path])
+
+
+def cmd_apk_start(a):
+    cfg = load_cfg()
+    rootfs = a.root or cfg["rootfs"]
+    need_root("launching an app")
+    if a.activity:
+        argv = ["/system/bin/am", "start", "-n", "%s/%s" % (a.package, a.activity)]
+    else:
+        argv = ["/system/bin/monkey", "-p", a.package, "-c",
+                "android.intent.category.LAUNCHER", "1"]
+    return enter_guest(rootfs, argv)
+
+
+def cmd_apk_list(a):
+    cfg = load_cfg()
+    rootfs = a.root or cfg["rootfs"]
+    return enter_guest(rootfs, ["/system/bin/cmd", "package", "list", "packages"])
+
+
+# --------------------------------------------------------------------------
+# boot / logs / stop
+# --------------------------------------------------------------------------
+def cmd_boot(a):
+    cfg = load_cfg()
+    rootfs = a.root or cfg["rootfs"]
+    if not os.path.isdir(rootfs):
+        raise Fail("rootfs not built")
+    if a.dry_run:
+        return subprocess.call(["sh", os.path.join(SCRIPTS, "30-boot.sh"), rootfs, a.mode,
+                                "--dry-run"])
+    need_root("booting the guest")
+    logdir = os.path.join(HOME_DIR, "logs")
+    os.makedirs(logdir, exist_ok=True)
+    log = open(os.path.join(logdir, "boot.log"), "ab")
+    p = subprocess.Popen(["sh", os.path.join(SCRIPTS, "30-boot.sh"), rootfs, a.mode],
+                         stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    with open(os.path.join(HOME_DIR, "guest.pid"), "w") as f:
+        f.write(str(p.pid))
+    print("guest booting as pid %d (%s mode), logs: %s"
+          % (p.pid, a.mode, os.path.join(logdir, "boot.log")))
+    print("  qandroid logs -f        follow boot log")
+    print("  qandroid apk install X  install an APK")
+    return 0
+
+
+def cmd_logs(a):
+    p = os.path.join(HOME_DIR, "logs", "boot.log")
+    if not os.path.exists(p):
+        raise Fail("no log yet (boot the guest first)")
+    if a.follow:
+        r = subprocess.Popen(["tail", "-n", str(a.lines), "-F", p])
+        try:
+            return r.wait()
+        except KeyboardInterrupt:
+            r.terminate()
+            return 0
+    with open(p, "r", errors="replace") as f:
+        lines = f.readlines()
+    sys.stdout.write("".join(lines[-a.lines:]))
+    return 0
+
+
+def cmd_stop(a):
+    pidfile = os.path.join(HOME_DIR, "guest.pid")
+    if not os.path.exists(pidfile):
+        print("guest not running")
+        return 0
+    pid = int(open(pidfile).read().strip())
+    try:
+        os.killpg(pid, 15)
+        print("sent SIGTERM to guest process group %d" % pid)
+    except ProcessLookupError:
+        print("guest already gone")
+    os.unlink(pidfile)
+    return 0
+
+
+def cmd_display(a):
+    """Run the HWC2 client. The socket lives inside the rootfs (the guest's
+    /data/local/tmp), so the host path is derived from the rootfs rather than
+    from the guest-visible path."""
+    cfg = load_cfg()
+    rootfs = a.root or cfg["rootfs"]
+    client = os.path.join(HERE, "frontend", "hwc_client")
+    if not os.path.exists(client):
+        raise Fail("host client not built: run `make client` (needs libsdl2-dev)")
+    sockdir = os.path.join(rootfs, "data", "local", "tmp")
+    os.makedirs(sockdir, exist_ok=True)
+    sock = os.path.join(sockdir, "qandroid-hwc.sock")
+    argv = [client, "--socket", sock] + a.extra
+    print("+ %s" % " ".join(argv))
+    return subprocess.call(argv)
+
+
+def cmd_viewer(a):
+    return subprocess.call([sys.executable, os.path.join(HERE, "frontend", "viewer.py"),
+                            "--root", a.root or load_cfg()["rootfs"]] + a.extra)
+
+
+# --------------------------------------------------------------------------
+def main(argv):
+    ap = argparse.ArgumentParser(prog="qandroid", description=__doc__.splitlines()[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 epilog=__doc__)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("doctor")
+
+    pi = sub.add_parser("image")
+    pi_sub = pi.add_subparsers(dest="sub", required=True)
+    pl = pi_sub.add_parser("list")
+    pl.add_argument("--abi", default="arm64")
+    pl.add_argument("--variant")
+    pl.add_argument("--limit", type=int, default=8)
+    pl.add_argument("--json", action="store_true")
+    pf = pi_sub.add_parser("fetch")
+    pf.add_argument("--abi", default="arm64")
+    pf.add_argument("--variant", default="VANILLA")
+    pf.add_argument("--url")
+    pf.add_argument("--force", action="store_true")
+    pf.add_argument("--no-unpack", action="store_true")
+
+    pr = sub.add_parser("rootfs")
+    pr_sub = pr.add_subparsers(dest="sub", required=True)
+    pb = pr_sub.add_parser("build")
+    pb.add_argument("--image-dir")
+    pb.add_argument("--out")
+    pb.add_argument("--dry-run", action="store_true")
+    ps = pr_sub.add_parser("shell")
+    ps.add_argument("--root")
+    ps.add_argument("--dry-run", action="store_true")
+    ps.add_argument("args", nargs=argparse.REMAINDER)
+
+    pa = sub.add_parser("apk")
+    pa_sub = pa.add_subparsers(dest="sub", required=True)
+    pai = pa_sub.add_parser("info")
+    pai.add_argument("apk")
+    pai.add_argument("--json", action="store_true")
+    pax = pa_sub.add_parser("install")
+    pax.add_argument("apk")
+    pax.add_argument("--root")
+    pas = pa_sub.add_parser("start")
+    pas.add_argument("package")
+    pas.add_argument("--activity")
+    pas.add_argument("--root")
+    pal = pa_sub.add_parser("list")
+    pal.add_argument("--root")
+
+    pb2 = sub.add_parser("boot")
+    pb2.add_argument("--root")
+    pb2.add_argument("--mode", choices=["init", "manual"], default="init")
+    pb2.add_argument("--dry-run", action="store_true")
+    sub.add_parser("stop").add_argument("--root", nargs="?")
+    lg = sub.add_parser("logs")
+    lg.add_argument("--lines", type=int, default=100)
+    lg.add_argument("-f", "--follow", action="store_true")
+    pdl = sub.add_parser("display")
+    pdl.add_argument("--root")
+    pdl.add_argument("extra", nargs=argparse.REMAINDER)
+    pv = sub.add_parser("viewer")
+    pv.add_argument("--root")
+    pv.add_argument("extra", nargs=argparse.REMAINDER)
+
+    a = ap.parse_args(argv)
+    try:
+        if a.cmd == "doctor":
+            return cmd_doctor(a)
+        if a.cmd == "image":
+            return cmd_image_list(a) if a.sub == "list" else cmd_image_fetch(a)
+        if a.cmd == "rootfs":
+            return cmd_rootfs_build(a) if a.sub == "build" else cmd_rootfs_shell(a)
+        if a.cmd == "apk":
+            if a.sub == "info":
+                return cmd_apk_info(a)
+            if a.sub == "install":
+                return cmd_apk_install(a)
+            if a.sub == "start":
+                return cmd_apk_start(a)
+            return cmd_apk_list(a)
+        if a.cmd == "boot":
+            return cmd_boot(a)
+        if a.cmd == "logs":
+            return cmd_logs(a)
+        if a.cmd == "stop":
+            return cmd_stop(a)
+        if a.cmd == "display":
+            return cmd_display(a)
+        if a.cmd == "viewer":
+            return cmd_viewer(a)
+    except Fail as e:
+        print("qandroid: %s" % e, file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as e:
+        print("qandroid: command failed: %s" % e, file=sys.stderr)
+        return 1
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,86 @@
+name: guest-smoke
+
+# Manual only: downloads an ~870 MiB arm64 Android image, builds a rootfs and
+# tries to bring the guest up under QEMU on the runner.  This is a diagnostic
+# harness, not a gate - a TCG-translated Android may take many minutes to reach
+# zygote, and runner kernels vary in binderfs support.  Every step is captured
+# and uploaded so a failure is readable instead of mysterious.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_variant:
+        description: "Waydroid image variant"
+        type: choice
+        options: [VANILLA, GAPPS]
+        default: VANILLA
+      boot_mode:
+        description: "guest boot mode"
+        type: choice
+        options: [manual, init]
+        default: manual
+      boot_timeout_seconds:
+        description: "how long to let the guest run before dumping logs"
+        default: "180"
+
+jobs:
+  smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: host prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support e2fsprogs \
+            python3 curl unzip build-essential psmisc
+          # binderfs: a module on Ubuntu generic kernels
+          sudo modprobe binder_linux || echo "::warning::binder_linux module unavailable"
+          ls /sys/module/binder_linux 2>/dev/null || true
+          sudo update-binfmts --enable qemu-aarch64 || true
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "::warning::binfmt not registered"
+
+      - name: doctor
+        run: ./qandroid doctor || true
+
+      - name: fetch arm64 image
+        run: ./qandroid image fetch --abi arm64 --variant "${{ inputs.image_variant }}"
+
+      - name: build rootfs
+        run: ./qandroid rootfs build
+
+      - name: boot guest (headless, time-boxed)
+        run: |
+          set +e
+          sudo timeout --signal=TERM "${{ inputs.boot_timeout_seconds }}" \
+            sh scripts/30-boot.sh "$HOME/.local/share/qandroid/rootfs" "${{ inputs.boot_mode }}" \
+            > /tmp/boot.out 2>&1
+          echo "boot exit: $?" | tee -a /tmp/boot.out
+
+      - name: collect logs
+        if: always()
+        run: |
+          ROOTFS="$HOME/.local/share/qandroid/rootfs"
+          mkdir -p artifacts
+          cp /tmp/boot.out artifacts/ 2>/dev/null || true
+          for f in data/local/tmp/qandroid-boot.log data/local/tmp/*.pid; do
+            [ -e "$ROOTFS/$f" ] && cp "$ROOTFS/$f" artifacts/ || true
+          done
+          sudo sh -c 'dmesg | tail -200' > artifacts/dmesg.txt 2>/dev/null || true
+          # what actually made it into the guest userspace
+          ls -l "$ROOTFS/system/bin" 2>/dev/null | head -40 > artifacts/system-bin.txt || true
+          cat artifacts/qandroid-boot.log 2>/dev/null | tail -100 || true
+          echo "### guest boot log (tail)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          tail -60 artifacts/qandroid-boot.log 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guest-smoke-logs
+          path: artifacts/
+          if-no-files-found: warn

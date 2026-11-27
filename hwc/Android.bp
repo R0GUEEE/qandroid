@@ -1,0 +1,31 @@
+/*
+ * Android.bp - the shipping build.  Copy this directory into
+ * hardware/qandroid/hwc inside an AOSP/LineageOS tree whose tag matches the
+ * guest image, then:  m hwcomposer.qandroid
+ *
+ * Built as a system module (vendor: false): it uses the platform's
+ * <hardware/hwcomposer2.h>, which is the authoritative source for the
+ * HWC2_FUNCTION_* descriptor numbers, and it lives in /vendor/lib64/hw only
+ * after being copied there by the rootfs step.
+ */
+cc_library_shared {
+    name: "hwcomposer.qandroid",
+    proprietary: false,
+    relative_install_path: "hw",
+    vendor: false,
+
+    srcs: ["src/hwcomposer_qandroid.c"],
+    local_include_dirs: ["include"],
+
+    shared_libs: [
+        "libhardware",
+        "liblog",
+    ],
+
+    cflags: [
+        "-DLOG_TAG=\"qandroid-hwc\"",
+        "-Wall",
+        "-Wextra",
+        "-Wno-unused-parameter",
+    ],
+}
