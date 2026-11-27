@@ -1,0 +1,140 @@
+name: release
+
+# Tag-driven: pushing v* builds the three deliverables and publishes them.
+# Everything is rebuilt from the tag, never reused from a branch build.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "existing tag to release (e.g. v0.3.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  deb:
+    name: debian package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: toolchain
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list || true
+          sudo apt-get -o Acquire::Retries=5 update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libsdl2-dev dpkg-dev lintian
+      - name: build
+        run: |
+          VERSION=$(python3 -c "import re;print(re.search(r'^VERSION = \"([^\"]+)\"',open('qandroid').read(),re.M).group(1))")
+          TAG=${{ inputs.tag || github.ref_name }}
+          echo "package version $VERSION, tag $TAG"
+          [ "$TAG" = "v$VERSION" ] || echo "::warning::tag $TAG does not match VERSION $VERSION"
+          rm -rf dist
+          ./packaging/build-deb.sh --version "$VERSION" --out dist
+          test "$(ls dist/*.deb | wc -l)" -eq 1
+      - name: lintian
+        run: lintian --fail-on error dist/*.deb && echo "lintian clean"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-deb
+          path: dist/*.deb
+          if-no-files-found: error
+
+  guest:
+    name: aarch64 guest artifacts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: toolchain
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list || true
+          sudo apt-get -o Acquire::Retries=5 update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+            libsdl2-dev pkg-config file
+      - name: build
+        run: |
+          make -s tools
+          make -s -C hwc AARCH64_CC=aarch64-linux-gnu-gcc
+          make -s shim AARCH64_CC=aarch64-linux-gnu-gcc
+          make -s client
+          strip -s hwc/hwcomposer.qandroid.so shim/libabshim.so \
+                  tools/binder-mk tools/binder-ver frontend/hwc_client 2>/dev/null || true
+          file hwc/hwcomposer.qandroid.so | grep -q 'ARM aarch64'
+          file shim/libabshim.so | grep -q 'ARM aarch64'
+          mkdir -p rel
+          cp hwc/hwcomposer.qandroid.so shim/libabshim.so \
+             tools/binder-mk tools/binder-ver frontend/hwc_client rel/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-guest
+          path: rel/*
+          if-no-files-found: error
+
+  source:
+    name: source tarball
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: tar
+        run: |
+          VERSION=$(python3 -c "import re;print(re.search(r'^VERSION = \"([^\"]+)\"',open('qandroid').read(),re.M).group(1))")
+          OUT="$RUNNER_TEMP/qandroid-$VERSION.tar.gz"
+          tar --exclude=.git --exclude=__pycache__ --exclude=dist \
+              --transform "s,^\./,qandroid-$VERSION/," -czf "$OUT" .
+          mkdir -p rel && cp "$OUT" rel/
+          tar -tzf "rel/qandroid-$VERSION.tar.gz" | head -8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rel-source
+          path: rel/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: [deb, guest, source]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: rel
+          merge-multiple: true
+
+      - name: assemble
+        run: |
+          TAG=${{ inputs.tag || github.ref_name }}
+          VERSION=${TAG#v}
+          ls -lh rel
+          ( cd rel && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt )
+          # notes stay outside rel/ so they are not uploaded as an asset
+          cp packaging/RELEASE_NOTES.md "$RUNNER_TEMP/notes.md"
+          sed -i "s/@VERSION@/$VERSION/g; s/@TAG@/$TAG/g" "$RUNNER_TEMP/notes.md"
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=${{ inputs.tag || github.ref_name }}
+          gh release create "$TAG" rel/* \
+            --title "qandroid $TAG" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            || gh release upload "$TAG" rel/* --clobber
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)\t\(.size) bytes"'
