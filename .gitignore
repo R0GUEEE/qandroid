@@ -6,3 +6,4 @@ shim/libabshim.so
 *.o
 frontend/hwc_client
 hwc/hwcomposer.qandroid.so
+dist/

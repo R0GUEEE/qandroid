@@ -27,7 +27,9 @@ jobs:
 
       - name: host toolchain
         run: |
-          sudo apt-get update -qq
+          # hosted images carry third-party repos that intermittently 403
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list || true
+          sudo apt-get -o Acquire::Retries=5 update -qq
           # e2fsprogs: the rootfs-build test creates a real ext4 image
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config e2fsprogs
@@ -55,7 +57,8 @@ jobs:
 
       - name: toolchain
         run: |
-          sudo apt-get update -qq
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list || true
+          sudo apt-get -o Acquire::Retries=5 update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
             libsdl2-dev pkg-config file e2fsprogs
@@ -104,16 +107,20 @@ jobs:
 
       - name: build dependencies
         run: |
-          sudo apt-get update -qq
+          sudo rm -f /etc/apt/sources.list.d/microsoft*.list || true
+          sudo apt-get -o Acquire::Retries=5 update -qq
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libsdl2-dev dpkg-dev lintian
 
       - name: build the package
-        run: ./packaging/build-deb.sh --out dist
+        run: |
+          rm -rf dist
+          ./packaging/build-deb.sh --out dist
+          test "$(ls dist/*.deb | wc -l)" -eq 1 || { echo "::error::expected one .deb"; exit 1; }
 
       - name: inspect
         run: |
-          deb=$(ls dist/*.deb)
+          deb=$(ls dist/qandroid_*_amd64.deb)
           echo "artifact: $deb"
           dpkg-deb --info "$deb"
           dpkg-deb --contents "$deb" | wc -l
