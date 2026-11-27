@@ -52,6 +52,14 @@ Not verified, and not claimed:
 32-bit (`armeabi-v7a`) APKs are out of scope, and the guest has no GPU: the
 composer composites on the CPU.
 
+## New in 0.3.2
+
+* `hwcomposer.qandroid.so` exports its `HMI` entry point. 0.3.1 declared it
+  `static`, which compiles and links perfectly and produces a module that
+  `hw_get_module()` can never find; CI and the release job now assert the symbol.
+* release checksums cover `install.sh` as well (it was uploaded before the
+  checksum was taken).
+
 ## New in 0.3.1
 
 * `install.sh` — installs the CLI and its dependencies on Debian/Ubuntu (release

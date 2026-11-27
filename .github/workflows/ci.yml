@@ -72,6 +72,10 @@ jobs:
           file hwc/hwcomposer.qandroid.so
           file hwc/hwcomposer.qandroid.so | grep -q 'ARM aarch64' \
             || { echo "::error::composer module is not aarch64"; exit 1; }
+          # hw_get_module() dlsym()s "HMI"; a static definition links fine and
+          # yields a module that can never load
+          nm -D --defined-only hwc/hwcomposer.qandroid.so | grep -qw HMI \
+            || { echo "::error::composer module has no HMI entry point"; exit 1; }
 
       - name: guest bionic shim (aarch64)
         run: make shim AARCH64_CC=aarch64-linux-gnu-gcc && file shim/libabshim.so

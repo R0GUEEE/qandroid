@@ -885,7 +885,11 @@ static int qh_open(const struct hw_module_t *module, const char *id, struct hw_d
 
 static struct hw_module_methods_t qh_methods = {.open = qh_open};
 
-static struct hw_module_t HAL_MODULE_INFO_SYM = {
+/* The module entry point must be a global symbol: hw_get_module() dlsym()s
+ * "HMI" out of the shared object. `static` here compiles fine, links fine, and
+ * produces a module that can never be loaded - the only hint is a
+ * "'HMI' defined but not used" warning. */
+struct hw_module_t HAL_MODULE_INFO_SYM = {
     .tag = HARDWARE_MODULE_TAG,
     .module_api_version = HWC2_DEVICE_API_VERSION_1_0,
     .hal_api_version = 0,

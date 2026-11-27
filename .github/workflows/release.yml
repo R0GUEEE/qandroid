@@ -73,6 +73,8 @@ jobs:
                   tools/binder-mk tools/binder-ver frontend/hwc_client 2>/dev/null || true
           file hwc/hwcomposer.qandroid.so | grep -q 'ARM aarch64'
           file shim/libabshim.so | grep -q 'ARM aarch64'
+          nm -D --defined-only hwc/hwcomposer.qandroid.so | grep -qw HMI \
+            || { echo "::error::composer module has no HMI entry point"; exit 1; }
           mkdir -p rel
           cp hwc/hwcomposer.qandroid.so shim/libabshim.so \
              tools/binder-mk tools/binder-ver frontend/hwc_client rel/
@@ -122,11 +124,12 @@ jobs:
         run: |
           TAG=${{ inputs.tag || github.ref_name }}
           VERSION=${TAG#v}
-          ls -lh rel
-          ( cd rel && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt )
-          # ship the installer itself, so the exact script can be pinned
+          # ship the installer itself, so the exact script can be pinned; do it
+          # before the checksums so the installer is covered by them too
           cp install.sh rel/install.sh
           chmod 0755 rel/install.sh
+          ls -lh rel
+          ( cd rel && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt )
           # notes stay outside rel/ so they are not uploaded as an asset
           cp packaging/RELEASE_NOTES.md "$RUNNER_TEMP/notes.md"
           sed -i "s/@VERSION@/$VERSION/g; s/@TAG@/$TAG/g" "$RUNNER_TEMP/notes.md"

@@ -47,7 +47,7 @@ source install into `/opt/qandroid` with that distro's packages. It never edits
 `binfmt_misc`, never downloads the image, and never touches your home directory.
 
 ```sh
-sh install.sh --version 0.3.1        # pin a release (default: latest)
+sh install.sh --version 0.3.2        # pin a release (default: latest)
 sh install.sh --file ./pkg.deb       # install a local .deb
 sh install.sh --source               # force the source install (any distro)
 sh install.sh --with-image           # also run 'qandroid setup' (~1 GiB)
@@ -66,7 +66,7 @@ qandroid display    # HWC2 window (SDL2)
 ### Or install the package by hand
 
 ```sh
-sudo apt install ./qandroid_0.3.1_amd64.deb     # from a release or the CI artifact
+sudo apt install ./qandroid_0.3.2_amd64.deb     # from a release or the CI artifact
 ```
 
 The package installs `/usr/lib/qandroid/` (CLI, tools, scripts, qemu patches,
