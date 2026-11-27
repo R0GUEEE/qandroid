@@ -32,6 +32,7 @@ detect_arch() {
 ARCH=$(detect_arch)
 OUT=$ROOT/dist
 WITH_BINARIES=1
+HAS_SDL=0
 MAINTAINER=${MAINTAINER:-R0GUEEE <R0GUEEE@users.noreply.github.com>}
 
 while [ $# -gt 0 ]; do
@@ -98,6 +99,7 @@ if [ "$WITH_BINARIES" = 1 ]; then
         "$CC" -O2 -Wall -o "$APPDIR/frontend/hwc_client" frontend/hwc_client.c \
               -Ihwc/include $(pkg-config --cflags --libs sdl2)
         chmod 0755 "$APPDIR/frontend/hwc_client"
+        HAS_SDL=1
     else
         echo "note: SDL2 headers absent, hwc_client not prebuilt (CLI builds it on use)"
     fi
@@ -125,6 +127,14 @@ gzip -9n "$MANDIR/qandroid.1"
 chmod 0755 "$DOCDIR"
 
 # ---- control -------------------------------------------------------------
+DEPS="python3 (>= 3.8), qemu-user-static, e2fsprogs"
+if [ "$WITH_BINARIES" = 1 ] && [ -e "$APPDIR/tools/binder-mk" ]; then
+    DEPS="$DEPS, libc6"
+fi
+if [ "$HAS_SDL" = 1 ]; then
+    DEPS="$DEPS, libsdl2-2.0-0"
+fi
+
 INSTALLED_SIZE=$(python3 -c "
 import os,sys
 t=0
@@ -143,7 +153,7 @@ Installed-Size: ${INSTALLED_SIZE:-0}
 Section: misc
 Priority: optional
 Homepage: https://github.com/R0GUEEE/qandroid
-Depends: python3 (>= 3.8), qemu-user-static, e2fsprogs
+Depends: $DEPS
 Recommends: libsdl2-2.0-0, curl, android-sdk-libsparse-utils, binfmt-support
 Suggests: gcc | cc, make
 Description: run arm64 Android APKs on x86_64 Linux
@@ -188,6 +198,8 @@ for base, _dirs, files in os.walk(stage):
         continue
     for f in sorted(files):
         full = os.path.join(base, f)
+        if os.path.islink(full):
+            continue          # md5sums lists file contents; symlinks have none
         rel = os.path.relpath(full, stage)
         h = hashlib.md5()
         with open(full, "rb") as fh:

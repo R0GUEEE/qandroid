@@ -123,12 +123,15 @@ jobs:
           deb=$(ls dist/qandroid_*_amd64.deb)
           echo "artifact: $deb"
           dpkg-deb --info "$deb"
-          dpkg-deb --contents "$deb" | wc -l
+          # one listing to a file: piping dpkg-deb into `grep -q` makes it die of
+          # SIGPIPE the moment grep finds a match
+          dpkg-deb --contents "$deb" > /tmp/deb-contents.txt
+          wc -l < /tmp/deb-contents.txt
           for f in usr/bin/qandroid usr/lib/qandroid/qandroid \
                    usr/lib/qandroid/tools/binder-mk \
                    usr/lib/qandroid/frontend/hwc_client \
                    usr/share/man/man1/qandroid.1.gz; do
-            dpkg-deb --contents "$deb" | grep -q "$f" \
+            grep -q "$f" /tmp/deb-contents.txt \
               || { echo "::error::missing $f"; exit 1; }
           done
           sha256sum "$deb" | tee SHA256SUMS.deb
