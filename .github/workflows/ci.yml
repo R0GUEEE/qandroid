@@ -150,7 +150,9 @@ jobs:
           # an installed qandroid must find its own tree, its tools and its docs
           qandroid --help | head -3
           test -x /usr/lib/qandroid/tools/binder-mk
-          test -f /usr/lib/qandroid/docs/BRINGUP.md
+          # docs live under /usr/share/doc, not in the payload tree
+          test -f /usr/share/doc/qandroid/docs/BRINGUP.md
+          test -f /usr/share/doc/qandroid/README.md
           man --warnings -l /usr/share/man/man1/qandroid.1.gz > /dev/null
           echo "man page renders"
 
