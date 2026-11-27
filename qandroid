@@ -239,9 +239,34 @@ def md5_of(path):
 
 
 def download(url, dest, expected=None):
+    """curl if available (resumable, retried, mirror-redirect aware), else urllib.
+
+    A single-sourceforge-stream download via urllib is what stalled a CI
+    bring-up for 25 minutes; curl with --continue-at resumes across a dropped
+    mirror connection instead of starting the 870 MiB over."""
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = dest + ".part"
     print("fetching %s" % url)
+    curl = shutil.which("curl")
+    if curl:
+        args = [curl, "-L", "--fail", "--retry", "5", "--retry-delay", "3",
+                "--retry-all-errors", "--connect-timeout", "30",
+                "--speed-time", "60", "--speed-limit", "10240",
+                "-C", "-", "-o", tmp, url]
+        print("+ %s" % " ".join(args[:-1] + ["<url>"]))
+        r = subprocess.run(args)
+        if r.returncode != 0 or not os.path.exists(tmp):
+            raise Fail("curl failed with status %s" % r.returncode)
+        os.replace(tmp, dest)
+        h = hashlib.sha256()
+        with open(dest, "rb") as f:
+            for b in iter(lambda: f.read(1 << 20), b""):
+                h.update(b)
+        print("sha256 %s" % h.hexdigest())
+        if expected:
+            got = md5_of(dest)
+            print("md5    %s %s" % (got, "ok" if got == expected else "MISMATCH (mirror said %s)" % expected))
+        return dest
     with urllib.request.urlopen(url, timeout=60) as r, open(tmp, "wb") as f:
         total = int(r.headers.get("Content-Length") or 0)
         done = 0

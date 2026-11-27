@@ -26,10 +26,16 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 75
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      - name: cache the system image
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/qandroid/images
+          key: qandroid-image-${{ inputs.image_variant }}-arm64-v1
 
       - name: host prerequisites
         run: |
