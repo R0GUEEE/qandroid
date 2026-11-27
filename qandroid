@@ -98,17 +98,29 @@ def du(path):
 # doctor
 # --------------------------------------------------------------------------
 def probe_binfmt():
-    p = "/proc/sys/fs/binfmt_misc/qemu-aarch64"
-    if not os.path.exists(p):
+    """Any enabled entry whose magic matches arm64 ELFs counts - the distro
+    package and our own registration use different names."""
+    base = "/proc/sys/fs/binfmt_misc"
+    if not os.path.isdir(base):
         return None
     try:
-        with open(p) as f:
-            txt = f.read()
-    except OSError as e:
-        return "unreadable: %s" % e
-    if "enabled" not in txt:
-        return "registered but disabled"
-    return "registered"
+        names = os.listdir(base)
+    except OSError:
+        return None
+    found = []
+    for n in names:
+        if n in ("register", "status"):
+            continue
+        try:
+            with open(os.path.join(base, n)) as f:
+                txt = f.read()
+        except OSError:
+            continue
+        if "enabled" in txt and ("aarch64" in n or "aarch64" in txt):
+            interp = [l.split(None, 1)[1].strip() for l in txt.splitlines()
+                      if l.startswith("interpreter ")]
+            found.append("%s -> %s" % (n, interp[0] if interp else "?"))
+    return "; ".join(found) if found else None
 
 
 def kernel_version():
