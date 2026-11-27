@@ -113,12 +113,23 @@ Verified in this repo (unit tests, runnable now):
   including a live `SCM_RIGHTS` round trip where the kernel supports it.
 * `frontend/hwc_client.c` — SDL2 window + uinput touchscreen, builds clean.
 
-Not yet verified (needs an x86_64 Ubuntu box with a real image and root — this
-project was authored from an arm64 sandbox):
+Brought up on GitHub Actions (see `docs/BRINGUP.md` for the run-by-run
+evidence):
 
-* the guest actually booting to a working zygote
-* `pm install` of a real APK
-* SurfaceFlinger + the screencap viewer
+* arm64 Android binaries execute under `qemu-aarch64-static` — the bionic
+  linker, `sh`, `netd`, `audioserver` all reach their own code
+* `binderfs` mounts, nodes are created and the guest opens `/dev/binder`
+* flattened APEX binding works; APEX and `system_ext` libraries resolve once
+  `/linkerconfig/ld.config.txt` exists
+
+Still not verified:
+
+* binder **transactions** — `BINDER_VERSION` returns `ENOTTY` from inside QEMU
+  while the host gets protocol 8 from the same node; `patches/apply.sh` now
+  contains the `do_ioctl` passthrough that fixes it, but it needs a qemu built
+  from source
+* booting to a working zygote, `pm install` of a real APK
+* SurfaceFlinger + the HWC client end to end
 * performance numbers
 
 The project is structured so those are *runs*, not rewrites: `qandroid doctor`

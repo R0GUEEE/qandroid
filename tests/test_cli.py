@@ -59,6 +59,14 @@ class RssTest(unittest.TestCase):
         self.assertNotIn("x86_64", arm[0]["path"])
 
 
+FAKE_QEMU_IOCTL = """\
+static abi_long do_ioctl(CPUArchState *cpu_env, int fd, abi_long cmd, abi_long arg)
+{
+    return -TARGET_ENOTTY;
+}
+
+"""
+
 FAKE_QEMU_SYSCALL = """\
 #include <linux/prctl.h>
 
@@ -81,7 +89,7 @@ class PatchTest(unittest.TestCase):
         os.makedirs(os.path.join(self.tmp, "linux-user"))
         self.src = os.path.join(self.tmp, "linux-user", "syscall.c")
         with open(self.src, "w") as f:
-            f.write(FAKE_QEMU_SYSCALL)
+            f.write(FAKE_QEMU_SYSCALL + FAKE_QEMU_IOCTL)
         self.apply = os.path.join(ROOT, "patches", "apply.sh")
 
     def test_patch_is_applied_once_and_idempotent(self):
@@ -107,6 +115,19 @@ class PatchTest(unittest.TestCase):
         r = subprocess.run(["python3", self.apply, self.tmp], capture_output=True, text=True)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("anchor not found", r.stderr)
+
+    def test_binder_ioctl_passthrough_is_added(self):
+        r = subprocess.run(["python3", self.apply, self.tmp], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        with open(self.src) as f:
+            text = f.read()
+        self.assertIn("QANDROID_BINDER_IOCTL", text)
+        self.assertIn("== 'b'", text)
+        # the guard must sit inside do_ioctl, before its body
+        body = text[text.index("do_ioctl("):]
+        self.assertLess(body.index("QANDROID_BINDER_IOCTL"), body.index("TARGET_ENOTTY"))
+        # and the prctl patch must still be there
+        self.assertIn("QANDROID_PR_SET_VMA", text)
 
     def test_not_a_qemu_tree(self):
         r = subprocess.run(["python3", self.apply, tempfile.mkdtemp()],

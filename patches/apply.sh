@@ -13,6 +13,24 @@ import sys
 
 GUARD = "QANDROID_PR_SET_VMA"
 
+# --- patch 2: pass binder ioctls straight to the host driver -----------------
+BINDER_GUARD = "QANDROID_BINDER_IOCTL"
+
+BINDER_SNIPPET = """
+    /* %s
+     * linux-user answers ENOTTY for any ioctl it has no translation entry for,
+     * and it has none for the BINDER_* commands. The binder ABI is a plain
+     * pointer-through protocol (the kernel copies to and from the argument
+     * struct), so the request can go to the host driver unchanged.
+     * Symptom without this: binderfs nodes exist and open fine, then
+     * BINDER_VERSION (0xc0046209) fails with ENOTTY and every Android service
+     * aborts with "Binder driver could not be opened".
+     */
+    if (((cmd >> 8) & 0xff) == 'b') {
+        return get_errno(ioctl(fd, cmd, arg));
+    }
+""" % BINDER_GUARD
+
 SNIPPET = """
     /* %s
      * bionic names anonymous mappings with
@@ -54,6 +72,29 @@ def patch(path, anchor, insert_after_open_brace=True):
     return True
 
 
+def patch_binder_ioctl(path):
+    with open(path) as f:
+        src = f.read()
+    if BINDER_GUARD in src:
+        print("already patched: binder ioctl passthrough")
+        return False
+    anchor = "static abi_long do_ioctl("
+    at = src.find(anchor)
+    if at < 0:
+        sys.exit("anchor not found: %r (inspect linux-user/syscall.c)" % anchor)
+    # make sure the parameter names we rely on are still there
+    head = src[at:src.index("{", at)]
+    for param in ("cmd", "fd", "arg"):
+        if param not in head:
+            sys.exit("do_ioctl signature changed, expected a %r parameter: %s" % (param, head))
+    brace = src.index("{", at)
+    src = src[:brace + 1] + BINDER_SNIPPET + src[brace + 1:]
+    with open(path, "w") as f:
+        f.write(src)
+    print("patched %s: binder ioctl passthrough" % path)
+    return True
+
+
 def main(argv):
     if len(argv) != 1:
         sys.exit(__doc__)
@@ -62,6 +103,7 @@ def main(argv):
     if not os.path.exists(target):
         sys.exit("%s does not look like a qemu tree (no linux-user/syscall.c)" % root)
     changed = patch(target, "static abi_long do_prctl(")
+    changed = patch_binder_ioctl(target) or changed
     # keep the tree tidy: qemu builds with -Werror in some CI setups
     if changed:
         print("\nnow rebuild:  cd %s && ./configure --target-list=aarch64-linux-user "
