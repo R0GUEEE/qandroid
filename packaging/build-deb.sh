@@ -248,7 +248,10 @@ chmod 0644 "$STAGE/DEBIAN/md5sums"
 mkdir -p "$OUT"
 DEB=$OUT/${PKG}_${VERSION}_${ARCH}.deb
 echo "== dpkg-deb =="
-dpkg-deb --build --root-owner-group "$STAGE" "$DEB"
+# xz, not the host default: dpkg on a modern Ubuntu defaults to zstd, which
+# older dpkg builds (and any tool without libzstd) cannot read. xz is read by
+# every dpkg since 1.17.
+dpkg-deb --build --root-owner-group -Zxz --uniform-compression "$STAGE" "$DEB"
 echo
 dpkg-deb --info "$DEB"
 echo
