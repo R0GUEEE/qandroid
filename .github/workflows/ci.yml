@@ -218,7 +218,9 @@ jobs:
       - name: source install inside a clean alpine container
         run: |
           docker run --rm -v "$PWD:/src" alpine:3.20 sh -euc '
-            apk add --no-cache curl tar
+            # build-base so the installer can compile the host helpers, which is
+            # what a real user with a compiler gets
+            apk add --no-cache curl tar build-base
             sh /src/install.sh --source --version 0.3.0 --prefix /opt/qandroid
             qandroid --version
             test -f /opt/qandroid/qandroid

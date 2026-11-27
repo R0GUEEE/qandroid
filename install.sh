@@ -185,8 +185,11 @@ install_pm_deps() {
             zypper --non-interactive install python3 qemu-linux-user e2fsprogs curl
             ;;
         apk)
-            say "installing: python3 qemu-aarch64 e2fsprogs curl"
-            apk add --no-cache python3 e2fsprogs curl || true
+            # Alpine splits debugfs into e2fsprogs-extra, which the rootfs
+            # builder needs; qemu-aarch64 is the dynamic build (the CLI accepts
+            # either name)
+            say "installing: python3 e2fsprogs e2fsprogs-extra curl qemu-aarch64"
+            apk add --no-cache python3 e2fsprogs e2fsprogs-extra curl || true
             apk add --no-cache qemu-aarch64 || apk add --no-cache qemu-user || true
             ;;
         *)
