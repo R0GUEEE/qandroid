@@ -284,16 +284,25 @@ install_source() {
 
 # ------------------------------------------------------------ uninstall ----
 do_uninstall() {
-    if command -v dpkg-query >/dev/null 2>&1 && dpkg-query -W -f='${Status}' qandroid 2>/dev/null | grep -q "install ok installed"; then
+    removed=0
+    # dpkg -s is the reliable test; parsing dpkg-query's Status field is brittle
+    if command -v dpkg >/dev/null 2>&1 && dpkg -s qandroid >/dev/null 2>&1; then
         say "removing the Debian package"
-        apt-get remove -y qandroid
-    elif [ -d "$PREFIX" ]; then
+        apt-get remove -y qandroid || dpkg -r qandroid || true
+        removed=1
+    fi
+    if [ -d "$PREFIX" ]; then
         say "removing $PREFIX"
         rm -rf "$PREFIX"
-    else
-        warn "qandroid does not look installed"
+        removed=1
     fi
-    rm -f /usr/local/bin/qandroid
+    # leftovers from either install path, and from interrupted runs
+    rm -f /usr/bin/qandroid /usr/local/bin/qandroid
+    [ -d /usr/lib/qandroid ] && rm -rf /usr/lib/qandroid
+    [ -d /usr/share/doc/qandroid ] && rm -rf /usr/share/doc/qandroid
+    rm -f /usr/share/man/man1/qandroid.1.gz
+    [ "$removed" = 1 ] || warn "qandroid did not look installed; cleaned up anyway"
+
     if [ "$PURGE_DATA" = 1 ]; then
         say "removing per-user images and rootfs data"
         for d in /root/.local/share/qandroid /home/*/.local/share/qandroid; do
@@ -301,6 +310,10 @@ do_uninstall() {
         done
     else
         warn "kept image/rootfs data; remove ~/.local/share/qandroid or pass --purge-data"
+    fi
+    if command -v qandroid >/dev/null 2>&1; then
+        warn "qandroid still resolves at $(command -v qandroid)"
+        return 1
     fi
     ok "uninstalled"
 }
