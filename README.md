@@ -35,14 +35,38 @@ That means the Android side is the *real* Android: real bionic, real ART, real
 binder semantics, real `pm`/`am`. Nothing about Android is being emulated or
 approximated. Only `mov`, `add` and friends are.
 
-## Install from a .deb
+## Install
 
 ```sh
-sudo apt install ./qandroid_0.3.0_amd64.deb     # from the CI artifact or a release
-qandroid doctor                                  # what the host still needs
-qandroid setup                                   # fetch an arm64 image, build a rootfs
+curl -fsSL https://raw.githubusercontent.com/R0GUEEE/qandroid/main/install.sh | sudo sh
+```
+
+The script picks the right path for the host: Debian/Ubuntu get the release
+`.deb` (checksum verified, dependencies resolved by apt), everything else gets a
+source install into `/opt/qandroid` with that distro's packages. It never edits
+`binfmt_misc`, never downloads the image, and never touches your home directory.
+
+```sh
+sh install.sh --version 0.3.0        # pin a release (default: latest)
+sh install.sh --file ./pkg.deb       # install a local .deb
+sh install.sh --source               # force the source install (any distro)
+sh install.sh --with-image           # also run 'qandroid setup' (~1 GiB)
+sh install.sh --uninstall [--purge-data]
+```
+
+Then, either way:
+
+```sh
+qandroid doctor     # confirm the host is ready (binderfs, qemu, binfmt)
+qandroid setup      # fetch an arm64 image and build a rootfs
 sudo qandroid boot
-./qandroid display                               # HWC2 window (SDL2)
+qandroid display    # HWC2 window (SDL2)
+```
+
+### Or install the package by hand
+
+```sh
+sudo apt install ./qandroid_0.3.0_amd64.deb     # from a release or the CI artifact
 ```
 
 The package installs `/usr/lib/qandroid/` (CLI, tools, scripts, qemu patches,

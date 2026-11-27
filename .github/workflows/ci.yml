@@ -172,6 +172,55 @@ jobs:
             SHA256SUMS.deb
           if-no-files-found: error
 
+  installer:
+    name: install.sh (real hosts)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: |
+          sudo apt-get -o Acquire::Retries=5 update -qq
+          sudo apt-get install -y --no-install-recommends shellcheck
+          shellcheck -S warning install.sh
+
+      - name: build a package to install
+        run: |
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+          ./packaging/build-deb.sh --out dist
+          ls -l dist/
+
+      - name: help and dry run
+        run: |
+          sh install.sh --help | head -4
+          sh install.sh --dry-run --version 0.3.0 | tail -8
+          sh install.sh --source --dry-run --version 0.3.0 | tail -3
+          sh install.sh --file /nonexistent.deb 2>&1 | tail -1 || true
+
+      - name: install the .deb inside a clean ubuntu container
+        run: |
+          docker run --rm -v "$PWD:/src" ubuntu:24.04 bash -euc '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              ca-certificates curl >/dev/null
+            sh /src/install.sh --file "$(ls /src/dist/*.deb)"
+            qandroid --version
+            qandroid doctor || true
+            test -x /usr/lib/qandroid/tools/binder-mk
+            sh /src/install.sh --uninstall
+            command -v qandroid && exit 1 || echo "uninstalled, CLI gone"
+          '
+
+      - name: source install inside a clean alpine container
+        run: |
+          docker run --rm -v "$PWD:/src" alpine:3.20 sh -euc '
+            apk add --no-cache curl tar
+            sh /src/install.sh --source --version 0.3.0 --prefix /opt/qandroid
+            qandroid --version
+            test -f /opt/qandroid/qandroid
+            test -x /opt/qandroid/tools/binder-mk
+          '
+
   package:
     name: source tarball
     needs: [unit, build]
