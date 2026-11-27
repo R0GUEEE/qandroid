@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import hashlib
@@ -327,6 +328,93 @@ def cmd_image_fetch(a):
 # --------------------------------------------------------------------------
 # rootfs
 # --------------------------------------------------------------------------
+def ext4_root_entries(img):
+    """Names in the image's root directory. One debugfs call, no recursion.
+
+    `ls -p` is the portable form (e2fsprogs has no `ls -1`): each entry is
+    "/<inode>/<mode>/<uid>/<gid>/<name>/<target>/", so the name is field 5."""
+    r = run(["debugfs", "-R", "ls -p /", img])
+    names = set()
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("debugfs") or line.startswith("***"):
+            continue
+        if line.startswith("/"):
+            parts = line.split("/")
+            if len(parts) >= 6 and parts[5]:
+                names.add(parts[5])
+        else:  # fallback for plain-name output
+            names.add(line.lstrip("/").split("/")[0])
+    names.discard(".")
+    names.discard("..")
+    return names
+
+
+def ensure_raw_image(img):
+    """Android sparse images (magic 0x3AFF26ED) need expansion before debugfs.
+    Returns the path to a raw ext4 image."""
+    with open(img, "rb") as f:
+        head = f.read(4)
+    if len(head) < 4 or struct.unpack("<I", head)[0] != 0x3AFF26ED:
+        return img
+    out = os.path.splitext(img)[0] + ".raw.img"
+    if os.path.exists(out) and os.path.getsize(out) > 0:
+        return out
+    tool = shutil.which("simg2img")
+    if not tool:
+        raise Fail("%s is a sparse image and simg2img is missing "
+                   "(apt install android-sdk-libsparse-utils)" % img)
+    print("expanding sparse image -> %s" % out)
+    with open(out, "wb") as dst:
+        r = subprocess.run([tool, img, "-"], stdout=dst)
+    if r.returncode:
+        raise Fail("simg2img failed")
+    return out
+
+
+def guest_resolve(rootfs, path):
+    """Resolve a guest-absolute path inside rootfs, following symlinks that are
+    absolute *in the guest's namespace* (Android images are full of them:
+    /bin -> /system/bin, /etc -> /system/etc). Returns a host path or None."""
+    parts = [p for p in path.split("/") if p and p != "."]
+    cur = ""
+    hops = 0
+    while parts:
+        seg = parts.pop(0)
+        if seg == "..":
+            cur = os.path.dirname(cur)
+            continue
+        cur = os.path.join(cur, seg)
+        full = os.path.join(rootfs, cur)
+        if not os.path.lexists(full):
+            return None
+        if os.path.islink(full):
+            if hops > 32:
+                return None
+            hops += 1
+            target = os.readlink(full)
+            if not target.startswith("/"):
+                cur = os.path.dirname(cur)   # relative to the link's directory
+            else:
+                cur = ""
+            parts = [p for p in target.split("/") if p and p != "."] + parts
+    return os.path.join(rootfs, cur)
+
+
+def guest_lstat(rootfs, path):
+    """Like guest_resolve, but does not follow the final component.
+
+    Needed because Android 12+ ships /system/bin/linker64 as a symlink into
+    /apex/com.android.runtime, which only exists once init has mounted the APEX
+    files at boot. Treating that as missing would be wrong."""
+    parent, name = os.path.split(path.rstrip("/"))
+    hp = guest_resolve(rootfs, parent or "/")
+    if hp is None:
+        return None
+    full = os.path.join(hp, name)
+    return full if os.path.lexists(full) else None
+
+
 def ext4_extract(img, dest, dry=False):
     """Unprivileged ext4 extraction via debugfs rdump (no loop mount, no root)."""
     cmd = ["debugfs", "-R", "rdump / %s" % dest, img]
@@ -360,8 +448,7 @@ def cmd_rootfs_build(a):
         print("unpacking logical partitions from super.img")
         subprocess.run([sys.executable, lp, "extract", superimg, raw, "--quiet"], check=True)
         for name in ("system", "vendor", "product"):
-            cand = os.path.join(raw, name)
-            for variant in (cand + ".img", cand + "_a.img"):
+            for variant in (os.path.join(raw, name + ".img"), os.path.join(raw, name + "_a.img")):
                 if os.path.exists(variant):
                     dest = os.path.join(src, name + ".img")
                     if not os.path.exists(dest):
@@ -372,52 +459,81 @@ def cmd_rootfs_build(a):
     if not os.path.exists(system):
         raise Fail("no system.img in %s" % src)
 
-    print("extracting system.img -> %s/system" % rootfs)
-    ext4_extract(system, os.path.join(rootfs, "system"), dry=a.dry_run)
+    system = ensure_raw_image(system)
+    entries = set() if a.dry_run else ext4_root_entries(system)
+
+    # Android 10+ images are system-as-root: the image *is* the guest root and
+    # carries its own /bin -> /system/bin style links.  Older images are a bare
+    # /system partition and have to be nested.
+    system_as_root = (not a.dry_run) and "system" in entries and "bin" in entries
+    if a.dry_run:
+        print("  (dry run: image layout not probed)")
+    print("image layout: %s" % ("system-as-root" if system_as_root else "system partition"))
+
+    dest = rootfs if system_as_root else os.path.join(rootfs, "system")
+    print("extracting %s -> %s" % (os.path.basename(system), dest))
+    ext4_extract(system, dest, dry=a.dry_run)
+
     if os.path.exists(vendor):
+        vendor = ensure_raw_image(vendor)
         print("extracting vendor.img -> %s/vendor" % rootfs)
         ext4_extract(vendor, os.path.join(rootfs, "vendor"), dry=a.dry_run)
 
-    # AOSP-style top level symlinks: /system/bin, /vendor/bin, /product, /odm
-    links = [("bin", "system/bin"), ("lib64", "system/lib64"), ("lib", "system/lib"),
-             ("etc", "system/etc"), ("apex", "system/apex")]
-    if os.path.isdir(os.path.join(rootfs, "system", "vendor")):
-        links.append(("vendor", "system/vendor"))
-    for link, target in links:
-        if a.dry_run:
-            continue
-        p = os.path.join(rootfs, link)
-        if os.path.lexists(p) or not os.path.isdir(os.path.join(rootfs, target)):
-            continue
-        os.symlink(target, p)
+    if not system_as_root:
+        for link, target in [("bin", "system/bin"), ("lib64", "system/lib64"),
+                             ("lib", "system/lib"), ("etc", "system/etc"),
+                             ("apex", "system/apex"), ("vendor", "system/vendor")]:
+            if a.dry_run:
+                continue
+            p = os.path.join(rootfs, link)
+            if os.path.lexists(p) or not os.path.isdir(os.path.join(rootfs, target)):
+                continue
+            os.symlink(target, p)
 
-    for d in ("data", "data/local/tmp", "data/app", "dev", "proc", "sys", "tmp",
-              "mnt", "sdcard", "system_dlkm", "metadata"):
-        if not a.dry_run:
-            os.makedirs(os.path.join(rootfs, d), exist_ok=True)
-    if os.path.isdir(os.path.join(rootfs, "system")) and not a.dry_run:
-        os.chmod(os.path.join(rootfs, "tmp"), 0o1777)
+    if not a.dry_run:
+        # The image already provides most of these - often as guest-absolute
+        # symlinks (/sdcard -> /storage/self/primary) that dangle on the host,
+        # so lexists() (not follows) decides, and a failure is a note not a
+        # traceback.
+        for d in ("data", "data/local/tmp", "data/app", "dev", "proc", "sys", "tmp",
+                  "mnt", "sdcard", "metadata"):
+            target = os.path.join(rootfs, d)
+            if os.path.lexists(target):
+                continue
+            try:
+                os.makedirs(target, exist_ok=True)
+            except OSError as e:
+                print("  note: %s not created (%s) - image layout already covers it"
+                      % (d, e.strerror))
+        tmpdir = guest_resolve(rootfs, "/tmp")
+        try:
+            if tmpdir and os.path.isdir(tmpdir):
+                os.chmod(tmpdir, 0o1777)
+        except OSError:
+            pass
+        with open(os.path.join(rootfs, ".qandroid-rootfs"), "w") as f:
+            f.write("built from %s\n" % os.path.abspath(src))
+
+        # sanity: the pieces init and the linker actually need
+        checks = ["/system/bin/init", "/system/bin/linker64", "/system/bin/sh",
+                  "/system/bin/app_process64", "/system/build.prop"]
+        missing = []
+        for c in checks:
+            hit = guest_resolve(rootfs, c)
+            if hit:
+                print("  %-28s ok" % c)
+                continue
+            if guest_lstat(rootfs, c):
+                print("  %-28s ok (via APEX, mounted at boot)" % c)
+                continue
+            print("  %-28s MISSING" % c)
+            missing.append(c)
+        if missing:
+            print("warning: %d expected guest path(s) missing; the image may need its "
+                  "vendor partition too" % len(missing))
 
     print("rootfs %s: %s, %d top-level entries" % (rootfs, human(du(rootfs)), len(os.listdir(rootfs))))
-    if not a.dry_run:
-        with open(os.path.join(rootfs, "etc", "qandroid-rootfs"), "w") as f:
-            f.write("built from %s\n" % os.path.abspath(src))
     return 0
-
-
-GUEST_ENV = {
-    "ANDROID_ROOT": "/system",
-    "ANDROID_DATA": "/data",
-    "ANDROID_ART_ROOT": "/apex/com.android.art",
-    "ANDROID_I18N_ROOT": "/apex/com.android.i18n",
-    "ANDROID_TZDATA_ROOT": "/apex/com.android.tzdata",
-    "ANDROID_STORAGE": "/storage",
-    "EXTERNAL_STORAGE": "/sdcard",
-    "PATH": "/system/bin:/system/xbin:/vendor/bin:/sbin:/usr/bin:/bin",
-    "HOME": "/data",
-    "USER": "root",
-    "LOGNAME": "root",
-}
 
 
 def guest_env():

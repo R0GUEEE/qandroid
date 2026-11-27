@@ -38,6 +38,37 @@ for n in binder hwbinder vndbinder; do
     fi
 done
 
+# APEX: these images ship *flattened* apexes under /system/apex/<name>/ while
+# the runtime expects them at /apex/<name> (that is where /system/bin/linker64
+# points). Mounting each one is the job init does on a device; here the host
+# does it, which is fine because it is a kernel-level operation, not a guest one.
+if [ -d "$ROOTFS/system/apex" ]; then
+    made=0
+    for d in "$ROOTFS"/system/apex/*/; do
+        [ -d "$d" ] || continue
+        name=$(basename "$d")
+        target="$ROOTFS/apex/$name"
+        mkdir -p "$target"
+        if mountpoint -q "$target" 2>/dev/null; then
+            continue
+        fi
+        if mount --bind "$d" "$target" 2>/dev/null; then
+            made=$((made + 1))
+        fi
+    done
+    echo "apex: bound $made flattened apex(es) into /apex"
+    if [ -x "$ROOTFS/system/bin/linker64" ] || [ -e "$ROOTFS/system/bin/linker64" ]; then
+        :
+    fi
+fi
+
+# the dynamic linker is what every other binary needs; check it before handing
+# over to the guest, because the failure mode otherwise is a wall of ENOENT
+if [ -e "$ROOTFS/system/bin/linker64" ] && [ ! -e "$ROOTFS/apex/com.android.runtime/bin/linker64" ]; then
+    echo "warning: /system/bin/linker64 dangles - /apex/com.android.runtime is not mounted." >&2
+    echo "         flatten-mount the apexes above, or run with real init." >&2
+fi
+
 install -m0755 "$HERE/guest-boot.sh" "$ROOTFS/system/bin/qandroid-boot"
 
 ENVV="ANDROID_ROOT=/system ANDROID_DATA=/data ANDROID_STORAGE=/storage \

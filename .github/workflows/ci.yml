@@ -28,14 +28,17 @@ jobs:
       - name: host toolchain
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends build-essential pkg-config
+          # e2fsprogs: the rootfs-build test creates a real ext4 image
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config e2fsprogs
 
       - name: composer module syntax check (vendored shim headers)
         run: make hwc-check
 
       - name: unit tests
         run: |
-          for t in tests/test_tools.py tests/test_cli.py tests/test_hwc_proto.py; do
+          for t in tests/test_tools.py tests/test_cli.py tests/test_hwc_proto.py \
+                   tests/test_rootfs_build.py; do
             echo "::group::$t"
             python3 "$t" -v
             echo "::endgroup::"

@@ -38,6 +38,7 @@ test check:
 	python3 tests/test_tools.py -v
 	python3 tests/test_cli.py -v
 	python3 tests/test_hwc_proto.py -v
+	python3 tests/test_rootfs_build.py -v
 
 doctor:
 	python3 ./qandroid doctor

@@ -12,7 +12,7 @@ import pathlib, sys
 bad = 0
 for f in ["qandroid", "tools/apk.py", "tools/lpunpack.py", "frontend/viewer.py",
           "patches/apply.sh", "tests/test_tools.py", "tests/test_cli.py",
-          "tests/test_hwc_proto.py"]:
+          "tests/test_hwc_proto.py", "tests/test_rootfs_build.py"]:
     try:
         compile(pathlib.Path(f).read_text(), f, "exec")
     except SyntaxError as e:
