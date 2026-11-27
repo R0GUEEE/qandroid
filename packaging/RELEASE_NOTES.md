@@ -10,6 +10,7 @@ platform's own code — nothing about Android is reimplemented.
 
 | file | what it is |
 |---|---|
+| `install.sh` | one-shot installer (`curl … \| sudo sh`, or pin this exact file) |
 | `qandroid_@VERSION@_amd64.deb` | Debian/Ubuntu package: CLI, tools, scripts, qemu patches, man page, host helpers |
 | `hwcomposer.qandroid.so` | software HWC2 composer module for the **guest** (arm64, build inside AOSP, see `docs/HWC.md`) |
 | `libabshim.so` | bionic symbol shim for standalone arm64 ELFs (arm64) |
@@ -51,7 +52,20 @@ Not verified, and not claimed:
 32-bit (`armeabi-v7a`) APKs are out of scope, and the guest has no GPU: the
 composer composites on the CPU.
 
-## Notable fixes in this release
+## New in 0.3.1
+
+* `install.sh` — installs the CLI and its dependencies on Debian/Ubuntu (release
+  `.deb`, checksum verified) and on any other distribution (source install with
+  that distro's packages). `--uninstall`, `--dry-run`, `--version`, `--file`,
+  `--source`, `--with-image`.
+* Alpine: `debugfs` comes from `e2fsprogs-extra`, and `qemu-aarch64` (not
+  `-static`) is what the repositories ship — the CLI accepts either.
+* Uninstall now removes everything both install paths can leave behind and
+  fails if `qandroid` still resolves.
+* `curl | sh` is detected: the script will not try to re-exec itself under sudo
+  when it has no file to re-exec.
+
+## Notable fixes in 0.3.0
 
 * rootfs extraction handles system-as-root images and flattened APEXes
 * `ld.config.txt` is generated at boot — without it every APEX library is invisible

@@ -124,6 +124,9 @@ jobs:
           VERSION=${TAG#v}
           ls -lh rel
           ( cd rel && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt )
+          # ship the installer itself, so the exact script can be pinned
+          cp install.sh rel/install.sh
+          chmod 0755 rel/install.sh
           # notes stay outside rel/ so they are not uploaded as an asset
           cp packaging/RELEASE_NOTES.md "$RUNNER_TEMP/notes.md"
           sed -i "s/@VERSION@/$VERSION/g; s/@TAG@/$TAG/g" "$RUNNER_TEMP/notes.md"

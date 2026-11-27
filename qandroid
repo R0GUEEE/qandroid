@@ -43,7 +43,7 @@ import urllib.request
 HERE = os.path.dirname(os.path.realpath(__file__))
 TOOLS = os.path.join(HERE, "tools")
 SCRIPTS = os.path.join(HERE, "scripts")
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 HOME_DIR = os.environ.get("QANDROID_HOME", os.path.expanduser("~/.local/share/qandroid"))
 # one feed for both partitions; the vendor images live under /images/vendor/
 RSS = "https://sourceforge.net/projects/waydroid/rss?path=/images"
